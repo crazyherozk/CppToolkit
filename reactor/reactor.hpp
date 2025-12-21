@@ -128,7 +128,7 @@ public:
     void removeSignal(int32_t signo) noexcept;
 
     /*0为最高优先级*/
-    void addAsync(task && func, bool wakeup = true, uint8_t prior = 0);
+    bool addAsync(task && func, bool wakeup = true, uint8_t prior = 0);
 
     bool addEvent(int32_t fd, int32_t ev, task & func) {
         return addEvent(fd, ev, std::forward<task>(func));
@@ -490,7 +490,7 @@ inline bool reactor::removeTimer(timerId & id) noexcept
     return false;
 }
 
-inline void reactor::addAsync(task && func, bool wakeup, uint8_t prior)
+inline bool reactor::addAsync(task && func, bool wakeup, uint8_t prior)
 {
     if (unlikely(prior >= asyncs_.size()))
         prior = static_cast<uint8_t>(asyncs_.size() - 1);
@@ -499,6 +499,7 @@ inline void reactor::addAsync(task && func, bool wakeup, uint8_t prior)
     asyncs_[prior].emplace_back(std::move(func));
     /*TODO:需要验证，极限优化（解锁判断？）*/
     if (wakeup && polling_) { notify(0); }
+    return true;
 }
 
 inline void reactor::addSignal(int32_t signo, task && func)

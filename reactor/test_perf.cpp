@@ -67,11 +67,11 @@ struct Fib {
 
 int main(void) {
     qevent::reactor loop;
-    const uint32_t count = 1U << 20;
 
     /*异步性能*/
     if (1)
 {
+    const uint32_t count = 1U << 20;
     fprintf(stderr, "异步任务性能测试\n");
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -162,15 +162,16 @@ int main(void) {
     server_addr.sin_port = htons(8000);
 
     if (bind(server_fd, (sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
+        close(server_fd);
         fprintf(stderr, "bind 失败\n");
         return EXIT_FAILURE;
     }
 
     // 3. 开始监听
     if (listen(server_fd, 10) == -1) {  //  backlog = 10
-        perror("listen 失败");
         close(server_fd);
-        return 1;
+        fprintf(stderr, "listen 失败\n");
+        return EXIT_FAILURE;
     }
 
     fprintf(stderr, "\tTCP 服务端启动，监听端口: 8000\n");
@@ -223,8 +224,11 @@ int main(void) {
         }
     });
 
-    do { loop.run(0); } while (true);
+    do { loop.run(10); } while (true);
 
+    loop.reset();
+
+    ::close(server_fd);
 }
 
     return EXIT_SUCCESS;
