@@ -2,7 +2,7 @@
 //  reactor.hpp
 //
 //
-//  Created by zhoukai on 2023/11/3.
+//  Created by zhoukai
 //
 
 #ifndef qevent_reactor_hpp

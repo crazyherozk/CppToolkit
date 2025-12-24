@@ -79,6 +79,7 @@ int main(void) {
 
     std::atomic<uint32_t> done{0};
     auto task = [&](void){
+        ::usleep(500);
         for (uint32_t i = 0; i < count/2; i++)
         {
             Fib fib(dist(gen));
@@ -111,6 +112,7 @@ int main(void) {
     fprintf(stderr, "\t内部事件次数(通知循环): %d\n", stat.nr_done_ - count);
 }
 
+    /*定时器性能*/
     if (1)
 {
     fprintf(stderr, "定时任务性能测试\n");
@@ -138,7 +140,8 @@ int main(void) {
     fprintf(stderr, "\t平均触发误差 : %.3f(ms)\n", (float)total/count);
 }
 
-    if (1)
+    /*IO监控性能*/
+    if (0)
 {
     /*
      * iperf -c 10.75.100.14 -p 8000 -t 10 -i 1 -P <#thread>
@@ -149,14 +152,13 @@ int main(void) {
     sockaddr_in server_addr, client_addr;
     socklen_t client_len = sizeof(client_addr);
 
-    // 1. 创建监听 socket
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
     // 设置 socket 选项：端口复用
     int32_t opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    // 2. 绑定地址和端口
+    // 绑定地址和端口
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;  // 监听所有网卡
     server_addr.sin_port = htons(8000);
@@ -167,7 +169,7 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    // 3. 开始监听
+    // 开始监听
     if (listen(server_fd, 10) == -1) {  //  backlog = 10
         close(server_fd);
         fprintf(stderr, "listen 失败\n");
