@@ -386,7 +386,7 @@ inline uint8_t workqueue::need_incr(void)
 #ifdef WQ_DEBUG
         show_info("Too many threads " + std::to_string(cfg_.max_thds_));
 #else
-        fprintf(stderr, "Too many threads [%zu/%d]\n", nr_worker, cfg_.max_thds_);
+        //fprintf(stderr, "Too many threads [%zu/%d]\n", nr_worker, cfg_.max_thds_);
 #endif
         return 0;
     }
@@ -429,9 +429,9 @@ inline void workqueue::wakeup_worker(void)
     if (cfg_.ordered_ && nr_act) { return; }
     auto works = works_.size();
     /*活动线程少，TODO:创建标志？异步创建？*/
-    if (unlikely(nr_act * 2 < works)) { incr_worker(); return; }
-    /*太多活动的任务线程*/
-    if (nr_act > works) { return; }
+    if (unlikely((nr_act << 1) < works)) { incr_worker(); return; }
+    /*太多活动的任务线程，或没有活动线程则不唤醒*/
+    if (!nr_idle() || nr_act > works) { return; }
     show_info("wakeup worker");
     cond_.notify_one();
 }
@@ -674,13 +674,15 @@ inline bool work::on_flushing(void)
 
 inline bool work::do_flush(WorkQueuePtr & wq, UniqueMutex & lk)
 {
-    auto bar = std::make_shared<barrier>(this->shared_from_this());
+    std::shared_ptr<barrier> bar;
     if (flags_ & work::PENDING_WQ) {
+        bar = std::make_shared<barrier>(this->shared_from_this());
         waiters_.push_back(bar);
     } else {
         auto wr = wr_.lock();
-        if (likely(wr) && (this == wr->work_ ||
+        if (wr && (this == wr->work_ ||
                 unlikely(flags_ & work::PENDING_WR))) {
+            bar = std::make_shared<barrier>(this->shared_from_this());
             wr->sched_works_.push_back(bar);
         } else {
             return false;
@@ -737,7 +739,6 @@ inline bool work::cancel(bool async)
 
 inline bool work::queue(void)
 {
-{
     auto wq    = wq_.lock();
     auto mutex = wq->lock();
     /*已经在队列中*/
@@ -757,10 +758,6 @@ inline bool work::queue(void)
     wq->works_.push_back(this->shared_from_this());
     wq->wakeup_worker();
     wq->show_info("queue end");
-}
-    /*防止非任务线程排队太快*/
-    auto & wr = worker::current();
-    if (!wr) { std::this_thread::yield(); }
     return true;
 }
 

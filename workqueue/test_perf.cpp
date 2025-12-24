@@ -32,26 +32,34 @@ private:
 std::atomic<uint32_t> LifecycleTimer::times{0};
 
 static uint32_t NR_WORKER = 2;
-constexpr uint32_t NR_WORK   = 1U << 16;
+constexpr uint32_t NR_WORK   = 1U << 20;
 
 int main(int32_t argc, char **argv) {
     if (argc == 2) {
         NR_WORKER = std::atoi(argv[1]);
     }
 
+    if ((NR_WORKER & 1) && NR_WORKER != 1) {
+        NR_WORKER += 1;
+    }
+
     fprintf(stderr, "---- 工作队列性能测试 ----\n");
     wq::config cfg;
-    cfg.max_thds_ = 10;
+    cfg.max_thds_ = 8;
     auto wq = std::make_shared<wq::workqueue>(cfg);
 
     std::vector<std::thread> threads;
     volatile std::atomic<uint32_t> nr_finish{0};
+    volatile bool running = false;
 
     for (size_t i = 0; i < NR_WORKER; i++) {
         /* code */
         threads.push_back(std::thread([&, wq](void) {
+            while (!running) {
+                std::this_thread::yield();
+            }
             std::vector<std::shared_ptr<wq::work>> tasks;
-            for (size_t i = 0; i < NR_WORK; i++) {
+            for (size_t i = 0; i < NR_WORK/NR_WORKER; i++) {
                 /* code */
                 tasks.push_back(std::make_shared<wq::work>(wq, [&](void){
                     nr_finish++;
@@ -67,13 +75,14 @@ int main(int32_t argc, char **argv) {
         }));
     }
 
+    running = true;
     for (auto &&worker : threads) {
         if (worker.joinable()) {
             worker.join();
         }
     }
 
-    assert(NR_WORKER * NR_WORK == nr_finish);
+    assert(NR_WORK == nr_finish);
 
     wq->stop();
     fprintf(stderr, "workqueue : %zu\n", wq.use_count());
