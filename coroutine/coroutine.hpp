@@ -148,6 +148,7 @@ public:
 private:
     context taskCtx_;
     context mainCtx_;
+    /*简单的记录状态，coroutine本身就不能并发（操作）*/
     CO_STATUS  status_{CO_STATUS::CO_SUSPEND};
     std::function<void(void)> func_{nullptr};
 private:
