@@ -29,14 +29,14 @@ int main(void)
 
     /*添加、删除、修改*/
     assert(!loop.removeEvent(pfd[1]));
-    assert(loop.addEvent(pfd[1], POLLIN, [](uint32_t){}));
-    assert(!loop.addEvent(pfd[1], POLLOUT, [](uint32_t){}));
-    assert(loop.modEvent(pfd[1], POLLOUT));
+    assert(loop.addEvent(pfd[1], qevent::EV_READ, [](uint32_t){}));
+    assert(!loop.addEvent(pfd[1], qevent::EV_WRITE, [](uint32_t){}));
+    assert(loop.modEvent(pfd[1], qevent::EV_WRITE));
     assert(loop.removeEvent(pfd[1]));
 
     std::cout << "\t可写性测试..." << std::endl;
     volatile bool wa = false;
-    assert(loop.addEvent(pfd[1], POLLOUT, [&](uint32_t){ wa = true; }));
+    assert(loop.addEvent(pfd[1], qevent::EV_WRITE, [&](uint32_t){ wa = true; }));
     /*写立即触发*/
     assert(loop.run(10) < 2);
     assert(wa);
@@ -52,7 +52,7 @@ int main(void)
 
     std::cout << "\t可读性测试..." << std::endl;
     volatile bool ra = false;
-    assert(loop.addEvent(pfd[0], POLLIN, [&](int32_t){ ra = true; }));
+    assert(loop.addEvent(pfd[0], qevent::EV_READ, [&](int32_t){ ra = true; }));
     /*不可读*/
     assert(loop.run(10) >= 10);
     assert(!ra);
@@ -73,7 +73,7 @@ int main(void)
     /*再次加入*/
     wa = false;
     ra = false;
-    assert(!loop.modEvent(pfd[1], POLLOUT));
+    assert(!loop.modEvent(pfd[1], qevent::EV_WRITE));
     /*不可写但可读*/
     std::cout << "\t不可写但可读..." << std::endl;
     assert(loop.run(10) < 2);
@@ -81,7 +81,7 @@ int main(void)
 
     ra = false;
     assert(loop.removeEvent(pfd[0]));
-    assert(loop.addEvent(pfd[0], POLLIN, [&](int32_t){
+    assert(loop.addEvent(pfd[0], qevent::EV_READ, [&](int32_t){
         std::cout << "\t读空PIPE : ";
         do {
             char buff[512];

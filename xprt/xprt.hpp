@@ -1073,22 +1073,22 @@ inline int32_t connect(const HostAddr &host, int32_t family, int32_t proto,
     return rc;
 }
 
-inline int enableFdFlag(int fd, int flags)
+inline int enableFdFlag(int32_t fd, int32_t flags)
 {
     if (fd < 0) return -EBADF;
-    int oflags = fcntl(fd, F_GETFL, nullptr);
+    int32_t oflags = fcntl(fd, F_GETFL, nullptr);
     if (oflags < 0) return -errno;
-    int rc = fcntl(fd, F_SETFL, oflags | flags);
+    int32_t rc = fcntl(fd, F_SETFL, oflags | flags);
     if (rc < 0) return -errno;
     return 0;
 }
 
-inline int disableFdFlag(int fd, int flags)
+inline int disableFdFlag(int32_t fd, int32_t flags)
 {
     if (fd < 0) return -EBADF;
-    int oflags = fcntl(fd, F_GETFL, nullptr);
+    int32_t oflags = fcntl(fd, F_GETFL, nullptr);
     if (oflags < 0) return -errno;
-    int rc = fcntl(fd, F_SETFL, oflags & ~flags);
+    int32_t rc = fcntl(fd, F_SETFL, oflags & ~flags);
     if (rc < 0) return -errno;
     return 0;
 }

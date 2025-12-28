@@ -54,9 +54,14 @@
 
 namespace qevent {
 
-/*不变工具类*/
+constexpr int32_t EV_READ  = POLLIN;
+constexpr int32_t EV_WRITE = POLLOUT;
+constexpr int32_t EV_PRI   = POLLPRI;
+constexpr int32_t EV_HUP   = POLLHUP;
+constexpr int32_t EV_ERROR = POLLERR;
 
 class reactor;
+/*不变工具类*/
 struct utils {
     friend class reactor;
 private:
@@ -361,7 +366,7 @@ inline reactor::reactor(void)
             std::generic_category()), "Cannot create pipe of reactor");
     }
     sigemptyset(&sigmask_);
-    addEvent(fd_[0], POLLIN, std::bind(&reactor::flush, this,
+    addEvent(fd_[0], EV_READ, std::bind(&reactor::flush, this,
             std::placeholders::_1));
     lock_guard guard(utils::all_mutex_);
     utils::all_reactors_.insert(this);
@@ -400,7 +405,7 @@ inline void reactor::reset(bool exec) noexcept
     eatAsync(mutex, 0);
     status_ = status();
     /*重新添加内部侦听*/
-    events_.emplace(fd_[0], ioTask(POLLIN, genId(),
+    events_.emplace(fd_[0], ioTask(EV_READ, genId(),
         std::bind(&reactor::flush, this, std::placeholders::_1)));
 }
 
@@ -636,7 +641,7 @@ inline void reactor::prepareEvent(PollEv & pev)
         if (unlikely(!ev)) { continue; }
         pev.kev_.get()[i].fd      = it.first;
         pev.kev_.get()[i].revents = 0;
-        pev.kev_.get()[i].events  = likely(ev)?static_cast<short>(ev):POLLPRI;
+        pev.kev_.get()[i].events  = likely(ev)?static_cast<short>(ev):EV_PRI;
         i += 1;
     }
     assert(i < (max + 1));
@@ -655,9 +660,9 @@ inline int32_t reactor::eatEvent(unique_lock & mutex, PollEv & pev) noexcept
         auto & evTask = io->second;
         auto ev = pl.revents & evTask.ev_;
         /*休眠期间关闭了事件，则不触发？*/
-        if (unlikely(!ev && !(pl.revents & (POLLHUP|POLLERR)))) { continue; }
+        if (unlikely(!ev && !(pl.revents & (EV_HUP|EV_ERROR)))) { continue; }
         /*写事件时一次性的*/
-        if (ev & POLLOUT) { evTask.ev_ &= (~POLLOUT); }
+        if (ev & EV_WRITE) { evTask.ev_ &= (~EV_WRITE); }
         auto version = ++evTask.version_;
         auto task = std::move(evTask.task_);
         status_.nr_done_++;

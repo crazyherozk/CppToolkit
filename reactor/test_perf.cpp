@@ -197,7 +197,7 @@ int main(void) {
 
     static uint8_t buff[4096];
 
-    loop.addEvent(server_fd, POLLIN, [&](int32_t) {
+    loop.addEvent(server_fd, qevent::EV_READ, [&](int32_t) {
         for (int32_t i = 0; i < 4; i++) {
             client_fd = accept(server_fd, nullptr, nullptr);
             if (client_fd == -1) {
@@ -208,7 +208,9 @@ int main(void) {
             }
             fprintf(stderr, "\t[*] 新的连接 [%d]\n", client_fd);
             setNonblock(client_fd);
-            loop.addEvent(client_fd, POLLIN, [&, cfd = client_fd](int32_t) {
+            loop.addEvent(client_fd, qevent::EV_READ,
+                    [&, cfd = client_fd](int32_t)
+            {
                 for (int i = 0; i < 8; i++) {
                     auto rc = read(cfd, buff, sizeof(buff));
                     if (rc < 1) {
