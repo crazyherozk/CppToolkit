@@ -68,6 +68,9 @@ using TcpListenerXprtPtr = std::shared_ptr<TcpListenerXprt>;
 using XprtMgrPtr         = std::shared_ptr<XprtMgr>;
 using XprtDelegatePtr    = std::shared_ptr<XprtDelegate>;
 
+constexpr int32_t INET_IPV4 = AF_INET;
+constexpr int32_t INET_IPV6 = AF_INET6;
+
 enum {
     XPRT_TCPLSNR = 1, /*TCP侦听套机字*/
     XPRT_TCPCLNT = 2, /*TCP主动连接套接字*/
@@ -137,9 +140,20 @@ protected:
 struct InAddr {
     struct sockaddr_storage addr;
     socklen_t               len { 0 };
+    InAddr() = default;
+    InAddr(const addrinfo * info) { this->operator=(info); }
     InAddr & operator=(const InAddr & other) {
         if (&other != this) {
             len = other.len; std::memcpy(&addr, &other.addr, len);
+        }
+        return *this;
+    }
+    InAddr & operator=(const addrinfo * info) {
+        if (info) {
+            len = info->ai_addrlen;
+            std::memcpy(&addr, info->ai_addr, len);
+        } else {
+            len = 0;
         }
         return *this;
     }
@@ -256,19 +270,19 @@ protected:
     void close(void) { stop(); ::close(fd_); fd_ = -1; }
     int32_t getAddrInfo(void);
     bool shutdownStat(uint32_t, bool sync = true);
-    static unsigned long flags(Xprt * xpt, unsigned long v) {
+    static uint32_t flags(Xprt * xpt, uint32_t v) {
         auto old = xpt->flags_; xpt->flags_ = v;
         return old;
     }
-    static inline uint32_t type(unsigned long s) { return s & XPRT_TYPE_MASK; }
-    static inline bool hasClosed(unsigned long s) {
+    static inline uint32_t type(uint32_t s) { return s & XPRT_TYPE_MASK; }
+    static inline bool hasClosed(uint32_t s) {
         return (s & XPRT_CLOSED)||((s & XPRT_SHUT_RDWR) == XPRT_SHUT_RDWR);
     }
 protected:
     int32_t fd_{-1};
     InAddr  localAddr_;
     InAddr  remoteAddr_;
-    unsigned long flags_{0};
+    uint32_t flags_{0};
     std::mutex lock_;
     XprtDelegatePtr delegate_;
     std::weak_ptr<XprtMgr> mgr_;
@@ -346,47 +360,49 @@ protected:
 ////////////////////////////////////////////////////////////////////////////////
 // utils
 ////////////////////////////////////////////////////////////////////////////////
+namespace utils {
 
-constexpr std::size_t bits_per_long = sizeof(unsigned long) * 8;
+constexpr std::size_t bits_per_int = sizeof(uint32_t) * 8;
 
-constexpr unsigned long bit_mask(int nr) noexcept {
-    return 1UL << (nr % bits_per_long);
+constexpr uint32_t bit_mask(const int nr) {
+    static_assert(XPRT_UNUSED_BIT <= bits_per_int, "XPRT_UNUSED_BIT must be <= 32");
+    return 1UL << (nr % bits_per_int);
 }
 
-constexpr std::size_t bit_word(int nr) noexcept {
-    return static_cast<std::size_t>(nr / bits_per_long);
+constexpr std::size_t bit_word(const int nr) {
+    return static_cast<std::size_t>(nr / bits_per_int);
 }
 
-static inline void set_bit(int nr, volatile unsigned long* addr) noexcept {
-    unsigned long mask = bit_mask(nr);
-    volatile unsigned long* p = addr + bit_word(nr);
+static inline void set_bit(const int nr, volatile uint32_t* addr) {
+    uint32_t mask = bit_mask(nr);
+    volatile uint32_t* p = addr + bit_word(nr);
     *p |= mask;
 }
 
-static inline bool test_and_set_bit(int nr, volatile unsigned long* addr) noexcept {
-    unsigned long mask = bit_mask(nr);
-    volatile unsigned long* p = addr + bit_word(nr);
-    unsigned long old = *p;
+static inline bool test_and_set_bit(const int nr, volatile uint32_t* addr) {
+    uint32_t mask = bit_mask(nr);
+    volatile uint32_t* p = addr + bit_word(nr);
+    uint32_t old = *p;
     *p = old | mask;
     return (old & mask) != 0;
 }
 
-static inline bool test_and_clear_bit(int nr, volatile unsigned long* addr) noexcept {
-    unsigned long mask = bit_mask(nr);
-    volatile unsigned long* p = addr + bit_word(nr);
-    unsigned long old = *p;
+static inline bool test_and_clear_bit(const int nr, volatile uint32_t* addr) {
+    uint32_t mask = bit_mask(nr);
+    volatile uint32_t* p = addr + bit_word(nr);
+    uint32_t old = *p;
     *p = old & ~mask;
     return (old & mask) != 0;
 }
 
-static inline bool test_bit(int nr, const volatile unsigned long* addr) noexcept {
-    return (addr[bit_word(nr)] >> (nr % bits_per_long)) & 1UL;
+static inline bool test_bit(const int nr, const volatile uint32_t* addr) {
+    return (addr[bit_word(nr)] >> (nr % bits_per_int)) & 1UL;
 }
 
 static inline int32_t ntop(const InAddr &addr, HostAddr &p);
 static inline int32_t pton(const HostAddr &p, InAddr &addr);
 
-static inline addrinfo *getAddrInfo(const HostAddr&,int32_t,int32_t,int32_t);
+static inline addrinfo *getAddrInfo(const HostAddr&, int32_t, int32_t, int32_t);
 static inline void freeAddrInfo(addrinfo *ai) {
     if (!ai) return;
     if (ai->ai_family == AF_UNIX) {::free(ai);} else {::freeaddrinfo(ai); }
@@ -424,7 +440,7 @@ static inline int32_t reusedAddr(int32_t fd) {
     int32_t val = 1;
     return setSockOpt(fd, SOL_SOCKET, SO_REUSEADDR, val);
 }
-
+}
 ////////////////////////////////////////////////////////////////////////////////
 
 inline int32_t XprtMgr::attachXprt(XprtPtr && xpt)
@@ -432,7 +448,7 @@ inline int32_t XprtMgr::attachXprt(XprtPtr && xpt)
     std::lock_guard<std::mutex> guard(lock_);
     if (unlikely(xpt->fd() < 0)) return -EBADF;
     /*已经 附加到容器了*/
-    bool rc = test_and_set_bit(XPRT_ATTACHED_BIT, &xpt->flags_);
+    bool rc = utils::test_and_set_bit(XPRT_ATTACHED_BIT, &xpt->flags_);
     if (unlikely(rc)) {
         app_log_error("Oops, something was wrong"); return -EBUSY;
     }
@@ -450,7 +466,7 @@ inline int32_t XprtMgr::detachXprt(XprtPtr && xpt, bool async)
     std::lock_guard<std::mutex> guard(lock_);
     if (unlikely(xpt->fd() < 0)) return -EBADF;
     /*已经 从容器剥离了*/
-    bool rc = test_and_clear_bit(XPRT_ATTACHED_BIT, &xpt->flags_);
+    bool rc = utils::test_and_clear_bit(XPRT_ATTACHED_BIT, &xpt->flags_);
     if (unlikely(!rc)) {
         app_log_error("Oops, something was wrong"); return -EINVAL;
     }
@@ -503,10 +519,10 @@ inline int32_t Xprt::destroy(XprtPtr & xpt, bool sync)
     auto rc = xpt->mgr()->detachXprt(xpt, false);
     if (rc) return -EINVAL;
     /*可能已经被关闭了*/
-    rc = test_and_set_bit(XPRT_CLOSED_BIT, &xpt->flags_);
+    rc = utils::test_and_set_bit(XPRT_CLOSED_BIT, &xpt->flags_);
     if (rc) return 0;
     auto v = flags(xpt.get(), xpt->flags_ & (~XPRT_SHUT_RDWR));
-    rc = test_and_clear_bit(XPRT_CONNECTING_BIT, &xpt->flags_);
+    rc = utils::test_and_clear_bit(XPRT_CONNECTING_BIT, &xpt->flags_);
     if (rc) {
         /*查看是否还处于连接状态，如果是，则不调用关闭事件回调*/
     } else if (likely(v & XPRT_OPENED)) {
@@ -522,7 +538,7 @@ inline int32_t Xprt::destroy(XprtPtr & xpt, bool sync)
 
 inline void Xprt::task(int32_t ev)
 {
-    unsigned long flags = *(volatile unsigned long*)&flags_;
+    uint32_t flags = *(volatile uint32_t*)&flags_;
 
 #ifdef XPRT_VERBOSE
     app_log_debug("trigger event [0x%x] on Xprt : [%d{0x%lx}], %s",
@@ -553,18 +569,18 @@ inline int32_t Xprt::eatConnecting(int32_t ev)
 {
     std::lock_guard<std::mutex> guard(lock_);
     if (unlikely(hasClosed(flags_))) {
-        app_log_warn("nonblock connection has been shutdown : %d/%lx",
+        app_log_warn("nonblock connection has been shutdown : %d/0x%08x",
             fd_, flags_);
         eatClosedLocked(POLLERR);
         return -ECONNABORTED;
     }
-    int32_t rc = test_and_clear_bit(XPRT_CONNECTING_BIT, &flags_);
+    int32_t rc = utils::test_and_clear_bit(XPRT_CONNECTING_BIT, &flags_);
     if (unlikely(!rc)) return 0;
 #if 0
     if (unlikely(ev & POLLERR)) {
         app_log_warn("nonblock connection encountered an error : %d/%lx",
              fd_, flags_);
-        set_bit(XPRT_CONNREFUSED_BIT, &flags_);
+        utils::set_bit(XPRT_CONNREFUSED_BIT, &flags_);
         eatClosed(POLLERR);
         return -ECONNREFUSED;
     }
@@ -573,13 +589,13 @@ inline int32_t Xprt::eatConnecting(int32_t ev)
     if (likely(rc)) {
         rc = errno;
         if (unlikely(rc == EALREADY)) {
-            set_bit(XPRT_CONNECTING_BIT, &flags_);
+            utils::set_bit(XPRT_CONNECTING_BIT, &flags_);
             return -EAGAIN;
         }
         if (unlikely(rc != EISCONN)) {
             app_log_warn("nonblocking connection failed : %d/%s", fd_,
                     strerror(rc));
-            set_bit(XPRT_CONNREFUSED_BIT, &flags_);
+            utils::set_bit(XPRT_CONNREFUSED_BIT, &flags_);
             eatClosedLocked(POLLERR);
             return -rc;
         }
@@ -591,7 +607,7 @@ inline int32_t Xprt::eatConnecting(int32_t ev)
     rc = getAddrInfo();
     if (likely(!rc)) { return 1; }
     app_log_warn("getaddrinfo of Xprt failed : %d/%s", fd_, strerror(-rc));
-    set_bit(XPRT_CONNREFUSED_BIT, &flags_);
+    utils::set_bit(XPRT_CONNREFUSED_BIT, &flags_);
     eatClosedLocked(qevent::EV_ERROR);
     return rc;
 }
@@ -601,7 +617,7 @@ inline void Xprt::eatOpened(int32_t ev)
     std::unique_lock<std::mutex> mutex(lock_);
     /*第一次变为可读/可写 ： 没有设置 opened ，且还没有被关闭*/
     if (unlikely(hasClosed(flags_))) return;
-    int32_t rc = test_and_set_bit(XPRT_OPENED_BIT, &flags_);
+    int32_t rc = utils::test_and_set_bit(XPRT_OPENED_BIT, &flags_);
     if (unlikely(rc)) return;
     if (delegate_) {
         auto xpt = this->shared_from_this();
@@ -613,7 +629,7 @@ inline void Xprt::eatOpened(int32_t ev)
 
 inline void Xprt::eatRecv(int32_t ev)
 {
-    auto flags = *(volatile unsigned long*)&flags_;
+    auto flags = *(volatile uint32_t*)&flags_;
     /*除了写事件，其他任何事件都需要通知读回调，因为缓存区内可能还有数据待处理*/
     if (!(ev & (~qevent::EV_WRITE)) || /*读端被关闭了*/
             unlikely(flags & (XPRT_CLOSED|XPRT_SHUTRD)))
@@ -627,7 +643,7 @@ inline void Xprt::eatRecv(int32_t ev)
 inline void Xprt::eatSend(int32_t ev)
 {
     /*尽可写才通知写回调*/
-    auto flags = *(volatile unsigned long*)&flags_;
+    auto flags = *(volatile uint32_t*)&flags_;
     if (!(ev & qevent::EV_WRITE) || /*写端被关闭了*/
             unlikely(flags & (XPRT_CLOSED|XPRT_SHUTWR)))
         return;
@@ -643,7 +659,7 @@ inline void Xprt::eatClosedLocked(int32_t ev)
     if (unlikely(ev & qevent::EV_ERROR))
         doShutdown(XPRT_SHUT_RDWR);
 
-    unsigned long stat = 0;
+    uint32_t stat = 0;
     /*已关闭，则一定删除事件*/
     if (likely(!(flags_ & XPRT_CLOSED))) {
         /*半关闭，或没有关闭*/
@@ -718,12 +734,12 @@ inline void Xprt::showAddrInfo(const std::string & what)
 #ifdef DEBUG
     HostAddr local, remote;
     if (unlikely(!localAddr_.len)) { return; }
-    ntop(localAddr_, local);
+    utils::ntop(localAddr_, local);
     if ((flags_ & XPRT_CONNECTING) || !remoteAddr_.len) {
         app_log_info("one Xprt was %s [%d] : [%s:%s]",
             what.c_str(), fd_, local.first.c_str(), local.second.c_str());
     } else if (likely(remoteAddr_.len)) {
-        ntop(remoteAddr_, remote);
+        utils::ntop(remoteAddr_, remote);
         app_log_info("one Xprt was %s [%d] : [%s:%s] ~ [%s:%s]",
             what.c_str(), fd_, local.first.c_str(), local.second.c_str(),
             remote.first.c_str(), remote.second.c_str());
@@ -742,20 +758,20 @@ inline int32_t TcpListenerXprt::listen(const HostAddr &host,
     std::lock_guard<std::mutex> guard(lock_);
     if (unlikely(fd_ > -1)) return -EISCONN;
     int32_t flags = option & (XPRT_RDREADY|XPRT_WRREADY|XPRT_OPT_UNIX);
-    fd_guard fd = network::listen(host,
+    fd_guard fd = utils::listen(host,
             flags&XPRT_OPT_UNIX?AF_UNIX:AF_UNSPEC,
                 [&](int32_t fd, const InAddr & sin) {
         int32_t rc = 0;
         if (option & XPRT_OPT_NONBLOCK) {
-            rc |= nonblock(fd, true);
+            rc |= utils::nonblock(fd, true);
             flags |= XPRT_OPT_NONBLOCK;
         }
         if (option & XPRT_OPT_REUSEDADDR) {
-            rc |= reusedAddr(fd);
+            rc |= utils::reusedAddr(fd);
             flags |= XPRT_OPT_REUSEDADDR;
         }
         if (option & XPRT_OPT_KEEPALIVE) {
-            rc |= keepAlive(fd, -1, -1);
+            rc |= utils::keepAlive(fd, -1, -1);
             flags |= XPRT_OPT_KEEPALIVE;
         }
         localAddr_ = sin;
@@ -796,7 +812,7 @@ inline void TcpListenerXprt::TcpAcceptor::onRecv(XprtPtr & xpt, int32_t) noexcep
 inline int32_t TcpListenerXprt::doAccept(XprtPtr & clnt) noexcept
 {
     InAddr sin;
-    fd_guard gfd = accept(fd(), sin);
+    fd_guard gfd = utils::accept(fd(), sin);
     if (*gfd < 0) { return *gfd; }
     std::shared_ptr<TcpListenerXprt> _this =
         std::static_pointer_cast<TcpListenerXprt>(this->shared_from_this());
@@ -813,9 +829,9 @@ inline int32_t TcpListenerXprt::doAccept(XprtPtr & clnt) noexcept
     }
 #ifdef __linux__
     if (likely(_this->flags_ & XPRT_OPT_NONBLOCK))
-        socket::nonblock(*gfd, true);
+        utils::nonblock(*gfd, true);
     if (likely(_this->flags_ & XPRT_OPT_KEEPALIVE))
-        socket::keepAlive(*gfd, -1, -1);
+        utils::keepAlive(*gfd, -1, -1);
 #endif
     auto _clnt = std::static_pointer_cast<TcpXprt>(std::move(clnt_));
     _clnt->fd_    = *gfd;
@@ -847,16 +863,16 @@ inline int32_t TcpXprt::connect(const HostAddr & host, uint32_t option)
     std::lock_guard<std::mutex> guard(lock_);
     if (unlikely(fd_ > -1)) return -EISCONN;
     uint32_t flags = 0;
-    fd_guard fd = tcpConnect(host,
+    fd_guard fd = utils::tcpConnect(host,
             option&XPRT_OPT_UNIX?AF_UNIX:AF_UNSPEC,
                 [&](int32_t fd, const InAddr & ss) {
         int32_t rc = 0;
         if (option & XPRT_OPT_NONBLOCK) {
-            rc |= nonblock(fd, true);
+            rc |= utils::nonblock(fd, true);
             flags |= (XPRT_OPT_NONBLOCK | XPRT_CONNECTING);
         }
         if (option & XPRT_OPT_KEEPALIVE) {
-            rc |= keepAlive(fd, -1, -1);
+            rc |= utils::keepAlive(fd, -1, -1);
             flags |= XPRT_OPT_KEEPALIVE;
         }
         localAddr_.len = 0;
@@ -895,30 +911,33 @@ inline int32_t TcpXprt::doShutdown(uint32_t how)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+namespace utils {
+
 int32_t ntop(const InAddr &in, HostAddr &p)
 {
+    if (!in.len) { return -EINVAL; }
     switch (in.addr.ss_family) {
-        case AF_INET: {
+        case INET_IPV4: {
             auto sin = reinterpret_cast<const sockaddr_in*>(&in.addr);
             if (unlikely(in.len != sizeof(*sin))) {
                 app_log_error("invalid length of sockaddr[IPv4]");
                 return -EINVAL;
             }
             char ipv4[INET_ADDRSTRLEN];
-            if (!::inet_ntop(AF_INET, &sin->sin_addr, ipv4, INET_ADDRSTRLEN))
+            if (!::inet_ntop(INET_IPV4, &sin->sin_addr, ipv4, INET_ADDRSTRLEN))
                 return -EINVAL;
             p = { ipv4, std::to_string(ntohs(sin->sin_port))};
         }
             break;
 #ifdef IPPROTO_IPV6
-        case AF_INET6: {
+        case INET_IPV6: {
             auto sin = reinterpret_cast<const sockaddr_in6*>(&in.addr);
             if (unlikely(in.len != sizeof(*sin))) {
                 app_log_error("invalid length of sockaddr[IPv6]");
                 return -EINVAL;
             }
             char ipv6[INET6_ADDRSTRLEN];
-            if (!::inet_ntop(AF_INET6, &sin->sin6_addr, ipv6, INET6_ADDRSTRLEN))
+            if (!::inet_ntop(INET_IPV6, &sin->sin6_addr, ipv6, INET6_ADDRSTRLEN))
                 return -EINVAL;
             p = { ipv6, std::to_string(ntohs(sin->sin6_port))};
         }
@@ -941,21 +960,21 @@ int32_t pton(const HostAddr &p, InAddr &in)
     std::memset(&in.addr, 0, sizeof(in.addr));
 
     auto *sin = reinterpret_cast<sockaddr_in*>(&in.addr);
-    rc = ::inet_pton(AF_INET, p.first.c_str(), &sin->sin_addr);
+    rc = ::inet_pton(INET_IPV4, p.first.c_str(), &sin->sin_addr);
     if (rc == 1) {
-        sin->sin_family = AF_INET;
+        sin->sin_family = INET_IPV4;
         sin->sin_port = htons(port);
-        in.len = sizeof(sockaddr_in);
+        in.len = sizeof(*sin);
         return 0;
     }
 
 #ifdef IPPROTO_IPV6
     auto *sin6 = reinterpret_cast<sockaddr_in6*>(&in.addr);
-    rc = ::inet_pton(AF_INET6, p.first.c_str(), &sin6->sin6_addr);
+    rc = ::inet_pton(INET_IPV6, p.first.c_str(), &sin6->sin6_addr);
     if (rc == 1) {
-        sin6->sin6_family= AF_INET6;
+        sin6->sin6_family= INET_IPV6;
         sin6->sin6_port = htons(port);
-        in.len = sizeof(sockaddr_in);
+        in.len = sizeof(*sin6);
         return 0;
     }
 #endif
@@ -1002,7 +1021,7 @@ inline addrinfo *getAddrInfo(const HostAddr & host, int32_t flag,
 }
 
 inline int32_t listen(const HostAddr & host, int32_t family,
-        setupSockFunc && setup)
+        setupSockFunc && setup = nullptr)
 {
     fd_guard sfd;
     int32_t rc = -EINVAL;
@@ -1011,11 +1030,10 @@ inline int32_t listen(const HostAddr & host, int32_t family,
         fd_guard gfd;
         gfd = ::socket(tmp->ai_family, tmp->ai_socktype, tmp->ai_protocol);
         if (*gfd < 0) { rc = -errno; continue; }
-        InAddr inaddr;
-        inaddr.len = tmp->ai_addrlen;
-        std::memcpy(&inaddr.addr, tmp->ai_addr, tmp->ai_addrlen);
-        rc = setup(*gfd, inaddr);
-        if (rc) break;
+        InAddr sin;
+        sin.len = tmp->ai_addrlen;
+        std::memcpy(&sin.addr, tmp->ai_addr, tmp->ai_addrlen);
+        if (setup) { rc = setup(*gfd, sin); if (rc) break; }
         rc = ::bind(*gfd, tmp->ai_addr, tmp->ai_addrlen);
         if (!rc) {
             rc = ::listen(*gfd, 128);
@@ -1048,7 +1066,7 @@ inline int32_t accept(int32_t lfd, InAddr & sin)
 }
 
 inline int32_t connect(const HostAddr &host, int32_t family, int32_t proto,
-        setupSockFunc && setup)
+        setupSockFunc && setup = nullptr)
 {
     fd_guard sfd;
     int32_t rc = -EINVAL;
@@ -1057,13 +1075,12 @@ inline int32_t connect(const HostAddr &host, int32_t family, int32_t proto,
         fd_guard gfd;
         gfd = ::socket(tmp->ai_family, tmp->ai_socktype, tmp->ai_protocol);
         if (*gfd < 0) { rc = -errno; continue; }
-        InAddr inaddr;
-        inaddr.len = tmp->ai_addrlen;
-        std::memcpy(&inaddr.addr, tmp->ai_addr, tmp->ai_addrlen);
-        rc = setup(*gfd, inaddr);
-        if (rc) break;
+        InAddr sin;
+        sin.len = tmp->ai_addrlen;
+        std::memcpy(&sin.addr, tmp->ai_addr, tmp->ai_addrlen);
+        if (setup) { rc = setup(*gfd, sin); if (rc) break; }
         rc = ::connect(*gfd, tmp->ai_addr, tmp->ai_addrlen);
-        if (!rc||(rc = -errno) == -EINPROGRESS){ sfd = std::move(gfd); break; }
+        if (!rc||(rc = -errno) == -EINPROGRESS) { sfd = std::move(gfd); break; }
     }
     if (!rc || rc == -EINPROGRESS) {
         if (rc) { errno = EINPROGRESS; } return sfd.eat();
@@ -1131,6 +1148,7 @@ inline int32_t keepAlive(int32_t fd, int32_t intervel, int32_t trys)
     return 0;
 }
 
+}
 }
 
 #endif
