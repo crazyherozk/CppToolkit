@@ -411,7 +411,7 @@ inline void reactor::reset(bool exec) noexcept
 
 inline bool reactor::addEvent(int32_t fd, int32_t ev, task && func)
 {
-    assert(fd > -1);
+    if (fd < 0) { return false; }
     lock_guard guard(mutex_);
     auto res = events_.emplace(fd, ioTask(ev, genId(), std::move(func)));
     if (res.second && polling_) { notify(0); }

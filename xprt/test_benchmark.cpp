@@ -6,7 +6,7 @@ QEVENT_REACTOR_VAR();
 int main(void)
 {
 
-    if (1)
+    if (0)
 {
     fprintf(stderr, "==== 辅助函数测试 ====\n");
 
@@ -100,7 +100,7 @@ int main(void)
 {
     fprintf(stderr, "\t[*] ipv4 侦听\n");
     network::fd_guard fd = network::utils::listen(
-        {"localhost", "10000"}, network::INET_IPV4, 
+        {"0.0.0.0", "10000"}, network::INET_IPV4, 
             [](int32_t sfd, const network::InAddr & addr)
     {
         auto rc = network::utils::keepAlive(sfd, 10, 5);
@@ -108,8 +108,39 @@ int main(void)
         return rc;
     });
     fprintf(stderr, "\t  [-] ipv4 侦听 : %s\n", *fd < 0?"失败":"成功");
+
+    if (*fd > -1) {
+        fprintf(stderr, "\t[*] ipv4 侦听(地址重用)\n");
+        network::fd_guard dup = network::utils::listen(
+            {"localhost", "10000"}, network::INET_IPV4
+        );
+        assert(*dup < 0);
+    }
+
 }
 
+}
+
+    fprintf(stderr, "==== 创建管理器 ====\n");
+
+    auto mgr = std::make_shared<network::XprtMgr>();
+    assert(mgr);
+
+    if (1)
+{
+    fprintf(stderr, "==== 服务端函数测试 ====\n");
+    auto server = std::make_shared<network::TcpListenerXprt>(mgr);
+
+    server->listen({"localhost", "10000"}, network::XPRT_OPT_NONBLOCK,
+        [](network::TcpListenerXprtPtr srv) {
+            auto xprt = std::make_shared<network::TcpXprt>(srv->mgr());
+            return xprt;
+    });
+}
+
+    if (1)
+{
+    fprintf(stderr, "==== 客户端函数测试 ====\n");
 }
 
     return EXIT_SUCCESS;

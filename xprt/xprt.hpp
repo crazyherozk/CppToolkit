@@ -129,11 +129,11 @@ struct XprtDelegate {
     virtual ~XprtDelegate(void) {}
 protected:
     /*@s 是 XPRT_XXX 的状态集合*/
-    virtual void onChanged(XprtPtr &, uint32_t s) noexcept {}
+    virtual void onChanged(XprtPtr &, uint32_t s){}
     /*@e 是 EV_XXX 的事件集合*/
-    virtual void onRecv(XprtPtr &, int32_t e)    noexcept {}
+    virtual void onRecv(XprtPtr &, int32_t e)    {}
     /*@e 是 EV_XXX 的事件集合*/
-    virtual void onSend(XprtPtr &, int32_t e)    noexcept {}
+    virtual void onSend(XprtPtr &, int32_t e)    {}
 };
 
 /*网络地址*/
@@ -208,7 +208,9 @@ struct XprtMgr
     ) : restartTimer<ReactorPtr>(lp) {
         launch(interval, std::bind(&XprtMgr::task, this, std::placeholders::_1));
     }
-    virtual ~XprtMgr(void) { this->stop(); }
+    virtual ~XprtMgr(void) {
+        app_log_info("destroy XprtMgr : %p", this); this->stop();
+    }
     ReactorPtr & loop(void) { return restartTimer<ReactorPtr>::loop_; }
 protected:
     int32_t attachXprt(XprtPtr &&xpt);
@@ -266,8 +268,7 @@ protected:
     virtual int32_t doShutdown(uint32_t how) { shutdownStat(how); return 0; }
 
 protected:
-    bool stop(void);
-    void close(void) { stop(); ::close(fd_); fd_ = -1; }
+    void close(void);
     int32_t getAddrInfo(void);
     bool shutdownStat(uint32_t, bool sync = true);
     static uint32_t flags(Xprt * xpt, uint32_t v) {
@@ -308,7 +309,7 @@ struct TcpListenerXprt :public Xprt {
     /*只需要读事件*/
     struct TcpAcceptor : public XprtDelegate {
     protected:
-        inline void onRecv(XprtPtr &, int32_t) noexcept override;
+        inline void onRecv(XprtPtr &, int32_t) override;
     };
     friend struct TcpListenerXprt::TcpAcceptor;
     explicit TcpListenerXprt(XprtMgrPtr mgr) : Xprt(mgr) {
@@ -464,13 +465,11 @@ inline int32_t XprtMgr::attachXprt(XprtPtr && xpt)
 inline int32_t XprtMgr::detachXprt(XprtPtr && xpt, bool async)
 {
     std::lock_guard<std::mutex> guard(lock_);
-    if (unlikely(xpt->fd() < 0)) return -EBADF;
+    if (unlikely(xpt->fd_ < 0)) return -EBADF;
     /*已经 从容器剥离了*/
     bool rc = utils::test_and_clear_bit(XPRT_ATTACHED_BIT, &xpt->flags_);
-    if (unlikely(!rc)) {
-        app_log_error("Oops, something was wrong"); return -EINVAL;
-    }
-    auto it = xprts_.find(xpt->fd());
+    if (unlikely(!rc)) { return -EINVAL; }
+    auto it = xprts_.find(xpt->fd_);
     if (unlikely(it == xprts_.end())) {
         app_log_error("Oops, something was wrong"); return -EINVAL;
     }
@@ -491,14 +490,20 @@ inline void XprtMgr::task(int32_t)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-inline bool Xprt::stop(void)
+inline void Xprt::close(void)
 {
+    /*只能内部调用，外部必须保证互斥*/
+    if (fd_ < 0) { return; }
     auto mgr = mgr_.lock();
-    if (mgr && likely(fd_ > -1)) {
-        mgr->loop()->removeEvent(fd_);
-        return true;
+    if (mgr) {
+        fprintf(stderr, "!!!!\n");
+        /*构造的一个假的，然后同步删除？*/
+        auto _this = std::shared_ptr<Xprt>(this, [](Xprt*){});
+        mgr->detachXprt(_this, false);
     }
-    return false;
+    removeEvent();
+    ::close(fd_);
+    fd_ = -1; 
 }
 
 inline void Xprt::delegate(XprtDelegatePtr && xdgt)
@@ -513,7 +518,8 @@ inline int32_t Xprt::destroy(XprtPtr & xpt, bool sync)
     if (unlikely(!xpt)) return -EINVAL;
     /*同步停止*/
     std::unique_lock<std::mutex> mutex(xpt->lock_);
-    if (!xpt->stop()) return -EBADF;
+    /*从事件循环中移除*/
+    xpt->removeEvent();
     /*等待读写完成*/
     if (sync) { xpt->sync(); }
     auto rc = xpt->mgr()->detachXprt(xpt, false);
@@ -798,7 +804,7 @@ inline int32_t TcpListenerXprt::doShutdown(uint32_t how)
     return 0;
 }
 
-inline void TcpListenerXprt::TcpAcceptor::onRecv(XprtPtr & xpt, int32_t) noexcept
+inline void TcpListenerXprt::TcpAcceptor::onRecv(XprtPtr & xpt, int32_t)
 {
     std::shared_ptr<TcpListenerXprt> _this =
         std::static_pointer_cast<TcpListenerXprt>(xpt);
@@ -1011,7 +1017,7 @@ inline addrinfo *getAddrInfo(const HostAddr & host, int32_t flag,
         if (n == 0) break;
         if (n != EAI_AGAIN) {
             app_log_error("Can't get address information "
-                "about socket by [%s : %s]\n",
+                "about socket by [%s : %s]",
                 host.first.c_str(), host.second.c_str());
             ai = nullptr;
             break;
