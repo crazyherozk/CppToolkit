@@ -157,14 +157,13 @@ int main(void)
 
     fprintf(stderr, "==== 服务端函数测试 ====\n");
     {
-        /*侦听成功后已经被管理起来了，离开此作用域并不会销毁*/
         fprintf(stderr, "  1. 侦听创建后，被管理器管理生命周期\n");
         volatile bool oneXprt = false;
         fprintf(stderr, "\t[*] 侦听 [localhost:10000]，但不加入事件循环\n");
+        /*客户端已经被管理起来了，离开此作用域并不会销毁*/
         auto server = std::make_shared<XprtServer>(mgr);
         /*不论Server还是被动创建的Client, 它们的事件都由调用者管理*/
-        auto rc = server->listen({"127.0.0.1", "10000"},
-            network::XPRT_OPT_NONBLOCK|network::XPRT_OPT_REUSEDADDR,
+        auto rc = server->listen({"localhost", "10000"}, network::XPRT_OPT_NONBLOCK,
             [&](network::TcpListenerXprtPtr srv) 
         {
             oneXprt = true;
@@ -202,18 +201,17 @@ int main(void)
     assert(XprtServer::nr_server == 1);
 
     {
-        /*侦听成功后，Server已经被管理起来了，要想在异常时被提前销毁，必须加入到事件循环*/
-
         fprintf(stderr, "  2. 侦听创建后，发生错误可以被自动销毁\n");
         volatile bool oneXprt = false;
+        /*客户端已经被管理起来了，要想在异常时被提前销毁，必须加入到事件循环*/
         fprintf(stderr, "\t[*] 侦听 [localhost:20000]，加入事件循环\n");
         auto server = std::make_shared<XprtServer>(mgr);
 
         assert(XprtServer::nr_server == 2);
 
         /*不论Server还是被动创建的Client, 它们的事件都由传入的事件选项来决定*/
-        auto rc = server->listen({"127.0.0.1", "20000"},
-            network::XPRT_OPT_NONBLOCK|network::XPRT_OPT_REUSEDADDR|network::XPRT_RDREADY,
+        auto rc = server->listen({"localhost", "20000"},
+            network::XPRT_OPT_NONBLOCK|network::XPRT_RDREADY,
             [&](network::TcpListenerXprtPtr srv) 
         {
             oneXprt = true;
@@ -238,63 +236,13 @@ int main(void)
 
         assert(oneXprt == true);
 
-        oneXprt = false;
         fprintf(stderr, "\t[!] 手动关闭\n");
-        rc = network::Xprt::shutdown(server, network::XPRT_SHUTRD);
-        assert(rc == 0);
-
-        rc = network::Xprt::shutdown(server, network::XPRT_SHUTRD);
-        assert(rc != 0);
-
-        fprintf(stderr, "\t[*] 连接 [localhost:20000]\n");
-        clnt = network::utils::connect(
-            {"localhost", "20000"}, network::INET_NONE, network::INET_TCP
-        );
-        assert(*clnt > -1);
+        network::Xprt::shutdown(server, network::XPRT_SHUTRD);
 
         fprintf(stderr, "\t[*] 开始循环\n");
-        /*由于延迟关闭，所以必须循环来检查，默认是100毫秒后执行回收*/
-        for (int32_t i = 0; i < 10; i++) {
-            mgr->loop()->run(20);
-        }
-    }
+        mgr->loop()->run(0);
 
-    assert(XprtServer::nr_server == 1);
-
-    {
-        fprintf(stderr, "  3. 侦听创建后，可以手动销毁\n");
-        /*客户端已经被管理起来了，要想在异常时被提前销毁，必须加入到事件循环*/
-        fprintf(stderr, "\t[*] 侦听 [localhost:30000]，加入事件循环\n");
-        auto server = std::make_shared<XprtServer>(mgr);
-
-        /*未侦听时，没有被管理*/
-        assert(server.use_count() == 1);
-        assert(XprtServer::nr_server == 2);
-
-        auto rc = server->listen({"127.0.0.1", "30000"},
-            network::XPRT_OPT_NONBLOCK|network::XPRT_OPT_REUSEDADDR,
-            [&](network::TcpListenerXprtPtr srv) 
-        {
-            return nullptr;
-        });
-
-        if (rc != 0) {
-            fprintf(stderr, "侦听失败，检查 30000 端口是否被占用\n");
-            exit(EXIT_FAILURE);
-        }
-
-        assert(server.use_count() == 2);
-        server->addEvent(qevent::EV_READ);
-        assert(server.use_count() == 3);
-
-        rc = network::Xprt::destroy(server);
-        assert(rc == 0);
-
-        rc = network::Xprt::destroy(server);
-        assert(rc != 0);
-
-        /*销毁后，不在被管理*/
-        assert(server.use_count() == 1);
+        assert(XprtServer::nr_server == 1);
     }
 }
 

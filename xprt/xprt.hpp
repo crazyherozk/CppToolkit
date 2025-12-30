@@ -68,8 +68,13 @@ using TcpListenerXprtPtr = std::shared_ptr<TcpListenerXprt>;
 using XprtMgrPtr         = std::shared_ptr<XprtMgr>;
 using XprtDelegatePtr    = std::shared_ptr<XprtDelegate>;
 
+/*尽量不使用宏*/
+constexpr int32_t INET_NONE = AF_UNSPEC;
 constexpr int32_t INET_IPV4 = AF_INET;
 constexpr int32_t INET_IPV6 = AF_INET6;
+constexpr int32_t UNIX_SOCK = AF_UNIX;
+constexpr int32_t INET_TCP  = SOCK_STREAM;
+constexpr int32_t INET_UDP  = SOCK_DGRAM;
 
 enum {
     XPRT_TCPLSNR = 1, /*TCP侦听套机字*/
@@ -208,9 +213,7 @@ struct XprtMgr
     ) : restartTimer<ReactorPtr>(lp) {
         launch(interval, std::bind(&XprtMgr::task, this, std::placeholders::_1));
     }
-    virtual ~XprtMgr(void) {
-        app_log_info("destroy XprtMgr : %p", this); this->stop();
-    }
+    virtual ~XprtMgr(void);
     ReactorPtr & loop(void) { return restartTimer<ReactorPtr>::loop_; }
 protected:
     int32_t attachXprt(XprtPtr &&xpt);
@@ -241,8 +244,8 @@ struct Xprt : public std::enable_shared_from_this<Xprt> {
     void delegate(XprtDelegatePtr && xdgt);
     void showAddrInfo(const std::string & what = "established");
     /*!!!如果同步，则不能在同一个事件循环中调用*/
-    static int32_t destroy(XprtPtr &, bool sync = true);
-    static int32_t shutdown(XprtPtr & xpt, uint32_t how) {
+    static int32_t destroy(XprtPtr, bool sync = true);
+    static int32_t shutdown(XprtPtr xpt, uint32_t how) {
         std::lock_guard<std::mutex> guard(xpt->lock_);
         return xpt->doShutdown(how);
     }
@@ -406,7 +409,7 @@ static inline int32_t pton(const HostAddr &p, InAddr &addr);
 static inline addrinfo *getAddrInfo(const HostAddr&, int32_t, int32_t, int32_t);
 static inline void freeAddrInfo(addrinfo *ai) {
     if (!ai) return;
-    if (ai->ai_family == AF_UNIX) {::free(ai);} else {::freeaddrinfo(ai); }
+    if (ai->ai_family == UNIX_SOCK) {::free(ai);} else {::freeaddrinfo(ai); }
 }
 
 static inline std::shared_ptr<addrinfo> getAddrInfoPtr(const HostAddr & host,
@@ -443,6 +446,11 @@ static inline int32_t reusedAddr(int32_t fd) {
 }
 }
 ////////////////////////////////////////////////////////////////////////////////
+inline XprtMgr::~XprtMgr(void) 
+{
+    this->stop();
+    app_log_info("destroy XprtMgr : %p", this);
+}
 
 inline int32_t XprtMgr::attachXprt(XprtPtr && xpt)
 {
@@ -496,12 +504,11 @@ inline void Xprt::close(void)
     if (fd_ < 0) { return; }
     auto mgr = mgr_.lock();
     if (mgr) {
-        fprintf(stderr, "!!!!\n");
         /*构造的一个假的，然后同步删除？*/
         auto _this = std::shared_ptr<Xprt>(this, [](Xprt*){});
         mgr->detachXprt(_this, false);
+        mgr->loop()->removeEvent(fd_);
     }
-    removeEvent();
     ::close(fd_);
     fd_ = -1; 
 }
@@ -513,7 +520,7 @@ inline void Xprt::delegate(XprtDelegatePtr && xdgt)
     delegate_ = std::move(xdgt);
 }
 
-inline int32_t Xprt::destroy(XprtPtr & xpt, bool sync)
+inline int32_t Xprt::destroy(XprtPtr xpt, bool sync)
 {
     if (unlikely(!xpt)) return -EINVAL;
     /*同步停止*/
@@ -765,7 +772,7 @@ inline int32_t TcpListenerXprt::listen(const HostAddr &host,
     if (unlikely(fd_ > -1)) return -EISCONN;
     int32_t flags = option & (XPRT_RDREADY|XPRT_WRREADY|XPRT_OPT_UNIX);
     fd_guard fd = utils::listen(host,
-            flags&XPRT_OPT_UNIX?AF_UNIX:AF_UNSPEC,
+            flags&XPRT_OPT_UNIX?UNIX_SOCK:INET_NONE,
                 [&](int32_t fd, const InAddr & sin) {
         int32_t rc = 0;
         if (option & XPRT_OPT_NONBLOCK) {
@@ -791,7 +798,7 @@ inline int32_t TcpListenerXprt::listen(const HostAddr &host,
     mkClnt_ = std::move(mkclnt);
     std::atomic_thread_fence(std::memory_order_release);
     /*启动事件*/
-    if (option & qevent::EV_READ) { addEvent(qevent::EV_READ|qevent::EV_PRI); }
+    if (option & XPRT_RDREADY) { addEvent(qevent::EV_READ|qevent::EV_PRI); }
     fd.eat();
     showAddrInfo();
     return 0;
@@ -799,8 +806,9 @@ inline int32_t TcpListenerXprt::listen(const HostAddr &host,
 
 inline int32_t TcpListenerXprt::doShutdown(uint32_t how)
 {
-    if (!(how & XPRT_SHUTRD)) return -EINVAL;
-    if (shutdownStat(XPRT_SHUTRD, false)) ::shutdown(this->fd(), SHUT_RDWR);
+    if (!(how & XPRT_SHUTRD)) { return -EINVAL; }
+    if (!shutdownStat(XPRT_SHUTRD, false)) { return -EINVAL; }
+    ::shutdown(this->fd(), SHUT_RDWR);
     return 0;
 }
 
@@ -870,7 +878,7 @@ inline int32_t TcpXprt::connect(const HostAddr & host, uint32_t option)
     if (unlikely(fd_ > -1)) return -EISCONN;
     uint32_t flags = 0;
     fd_guard fd = utils::tcpConnect(host,
-            option&XPRT_OPT_UNIX?AF_UNIX:AF_UNSPEC,
+            option&XPRT_OPT_UNIX?UNIX_SOCK:INET_NONE,
                 [&](int32_t fd, const InAddr & ss) {
         int32_t rc = 0;
         if (option & XPRT_OPT_NONBLOCK) {
@@ -949,7 +957,7 @@ int32_t ntop(const InAddr &in, HostAddr &p)
         }
             break;
 #endif
-        case AF_UNIX:
+        case UNIX_SOCK:
         default:
             return -EAFNOSUPPORT;
     }
@@ -992,7 +1000,7 @@ inline addrinfo *getAddrInfo(const HostAddr & host, int32_t flag,
 {
     addrinfo *ai = nullptr;
 
-    if (family == AF_UNIX) {
+    if (family == UNIX_SOCK) {
         socklen_t l = 0;
         sockaddr_un *un;
         ai = static_cast<addrinfo*>(std::malloc(sizeof(*ai) + sizeof(*un)));
@@ -1000,7 +1008,7 @@ inline addrinfo *getAddrInfo(const HostAddr & host, int32_t flag,
         un = reinterpret_cast<sockaddr_un*>(&ai[1]);
         l += offsetof(sockaddr_un, sun_path);
         l += snprintf(un->sun_path, sizeof(un->sun_path), "%s", host.first.c_str());
-        ai->ai_family   = AF_UNIX;
+        ai->ai_family   = UNIX_SOCK;
         ai->ai_socktype = socktype;
         ai->ai_addrlen  = l + 1;
         ai->ai_addr     = reinterpret_cast<sockaddr*>(un);
