@@ -198,11 +198,21 @@ inline void index::update_tail(uint32_t prev, uint32_t next, bool enqueue) {
 }
 
 /*prev 当前索引，next 自身保存索引*/
+
 inline uint32_t index::prepare_enqueue(uint32_t n, uint32_t &prev, uint32_t &next, uint32_t &nr_free)
 {
     uint32_t max, mask = this->mask();
     const bool single = (mode_ & SINGLE_PROD);
     const bool fixed  = (mode_ & ENQUEUE_FIXED);
+    /*
+     *
+     *     C.t       C.h        P.t       P.h
+     * -----+---------+----------+---------+-------
+     *      | pending |  stable  | pending |
+     * -----+---------+----------+---------+-------
+     *    ->|<- nr_count_stable->|         |<- nr_free_stable
+     *
+     */
     prev = prod_.head.load(std::memory_order_relaxed);
     do {
         max = n;
@@ -350,7 +360,7 @@ static inline int32_t sem_timedwait(sem_t* sem, const struct timespec* ts) {
     const auto deadline = system_clock::from_time_t(ts->tv_sec) +
                       nanoseconds(ts->tv_nsec);
     const microseconds min_step(100);
-    const microseconds max_step(5000);
+    const microseconds max_step(1000);
     microseconds step = min_step;
     do {
         if (sem_trywait(sem) == 0) { return 0; }
