@@ -441,6 +441,12 @@ inline reactor::timerId reactor::doAddTimer(uint64_t expire, task && func)
 {
     timerId id;
     lock_guard guard(mutex_);
+    if (timers_.size()) {
+        auto next = timers_.begin()->first;
+        if (next/1000000 == expire/1000000) {
+            expire += 1000000;
+        }
+    }
     id.first  = genId();
     id.second = expire;
     timers_.emplace(id.second, timerTask(id, std::move(func)));
