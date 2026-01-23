@@ -157,10 +157,10 @@ int main(void)
     auto rc = queue.pop(val, 100);
     assert(!rc);
     auto end_time = std::chrono::steady_clock::now();
-    auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
             end_time - start_time).count();
-    std::cout << "\t阻塞弹出耗时(毫秒):" << duration_ms << std::endl;
-    assert(duration_ms >= 100);
+    std::cout << "\t阻塞弹出耗时(毫秒):" << duration << std::endl;
+    assert(duration >= 100);
 
     rc = queue.push(100);
     assert(rc);
@@ -169,11 +169,11 @@ int main(void)
     rc = queue.pop(val, 100);
     assert(rc);
     end_time = std::chrono::steady_clock::now();
-    duration_ms = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
             end_time - start_time).count();
     
-    std::cout << "\t非阻塞弹出耗时(纳秒):" << duration_ms << std::endl;
-    assert(duration_ms < 1000);
+    std::cout << "\t非阻塞弹出耗时(纳秒):" << duration << std::endl;
+    assert(duration < 1000);
 }
 
     return EXIT_SUCCESS;
