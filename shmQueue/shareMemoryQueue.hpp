@@ -48,34 +48,34 @@ private:
     const uint8_t & at(uint32_t idx) const { return data_[idx & index_.mask()]; }
     uint8_t & at(uint32_t idx) { return data_[idx & index_.mask()]; }
 
-    void copyin(uint32_t & idx, const void *ptr, size_t count) {
+    void copyin(uint32_t & idx, const void *ptr, size_t size) {
         idx = index_.locate(idx);
         auto remaining = index_.size() - idx;
-        if (likely(count <= remaining)) {
-            std::memcpy(&data_[idx], ptr, count);
+        if (likely(size <= remaining)) {
+            std::memcpy(&data_[idx], ptr, size);
         } else {
             std::memcpy(&data_[idx], ptr, remaining);
-            std::size_t left = count - remaining;
+            std::size_t left = size - remaining;
             std::memcpy(&data_[0],
                 static_cast<const uint8_t*>(ptr) + remaining, left
             );
         }
-        idx += count;
+        idx += size;
     }
 
-    void copyout(uint32_t & idx, void *ptr, size_t count) {
+    void copyout(uint32_t & idx, void *ptr, size_t size) {
         idx = index_.locate(idx);
         auto remaining = index_.size() - idx;
-        if (likely(count <= remaining)) {
-            std::memcpy(ptr, &data_[idx], count);
+        if (likely(size <= remaining)) {
+            std::memcpy(ptr, &data_[idx], size);
         } else {
             std::memcpy(ptr, &data_[idx], remaining);
-            auto left = count - remaining;
+            auto left = size - remaining;
             std::memcpy(static_cast<uint8_t*>(ptr) + remaining,
                 &data_[0], left
             );
         }
-        idx += count;
+        idx += size;
     }
 
     template<typename T>
@@ -86,7 +86,6 @@ private:
         at(idx++) = static_cast<uint8_t>((size >> 16) & 0xffU);
         at(idx++) = static_cast<uint8_t>((size >> 24) & 0xffU);
         idx    += RSize; /*TODO:剩余的头空间，可以做CRC32验证？*/
-        size   -= HSize;
         return idx;
     }
 
@@ -110,7 +109,7 @@ private:
                 [=](uint32_t idx, uint32_t count) {
             encodeHSize(idx, count);
             /*拷贝内容*/
-            copyin(idx, ptr, count);
+            copyin(idx, ptr, size);
         });
         return rc > 0?true:false;
     }
@@ -381,13 +380,18 @@ inline bool ShareMemoryQueueBase::pop(void * ptr, size_t & size, int32_t ms)
     if (unlikely(!queue_)) { return false; }
     bool rc = queue_->pop(ptr, size);
     if (!rc && ms) {
-        /*自旋锁模式，大多临界区仅是数据拷贝，很短，所以可以尝试几次再休眠等待*/
-        for (int8_t i = 0; i < 7; i++) {
-            if ((i&1) == 0) {
-                ring::cpu_relax();
-            } else {
-                std::this_thread::yield();
+        /*自旋模式，大多临界区仅是数据拷贝，很短，所以可以尝试几次再休眠等待*/
+#if 1
+        for (int8_t i = 0; i < 3; i++) {
+            ring::cpu_relax();
+            rc = queue_->pop(ptr, size);
+            if (rc) {
+                return rc;
             }
+        }
+#endif
+        for (int8_t i = 0; i < 3; i++) {
+            std::this_thread::yield();
             rc = queue_->pop(ptr, size);
             if (rc) {
                 return rc;

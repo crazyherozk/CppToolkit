@@ -40,6 +40,7 @@ struct LatencyRing {
         }
         std::sort(samples.begin(), samples.end());
         auto p50  = samples[samples.size() * 50 / 100];
+        auto p90  = samples[samples.size() * 90 / 100];
         auto p99  = samples[samples.size() * 99 / 100];
         auto p999 = samples[samples.size() * 999 / 1000];
 
@@ -47,10 +48,11 @@ struct LatencyRing {
             "====== latency ======\n"
             "samples : %zu\n"
             "   P50  : %llu\n"
+            "   P90  : %llu\n"
             "   P99  : %llu\n"
             "   P999 : %llu\n"
             "=====================\n"
-            ,idx_, p50, p99, p999
+            ,idx_, p50, p90, p99, p999
         );
     }
 
@@ -101,7 +103,7 @@ static void sendMessage(bool fast) {
     std::cout << "\t[*] 发送完成"<< std::endl;
 }
 
-static void sendMessage(shm::ShareMemoryQueue & queue) {
+static void recvMessage(shm::ShareMemoryQueue & queue) {
     std::cout << "\t[*] 开始接收"<< std::endl;
     uint64_t start;
     uint64_t count{0};
@@ -160,7 +162,7 @@ int main(int32_t argc, char **argv) {
         _exit(EXIT_SUCCESS);
     }
 
-    sendMessage(queue);
+    recvMessage(queue);
 
     std::cout << "\t[*] 回收进程"<< std::endl;
     ::wait(nullptr);
