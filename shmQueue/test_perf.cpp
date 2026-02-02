@@ -7,6 +7,7 @@
 static const std::string qName = "/shm_queue_perf";
 constexpr uint64_t tCount = (1UL << 21);
 constexpr uint64_t sFreq  = 256;
+constexpr size_t   pSize  = 128;
 
 struct LatencyRing {
     static constexpr size_t N = tCount/sFreq;
@@ -80,6 +81,12 @@ static void sendMessage(bool fast) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     std::cout << "\t[*] 开始发送"<< std::endl;
 
+    struct Payload {
+        char buff[pSize];
+    };
+
+    Payload payload;
+
     uint64_t msgId = 0;
     while (msgId < tCount) {
         uint64_t ts = 0;
@@ -87,7 +94,7 @@ static void sendMessage(bool fast) {
             ts = sys_clock();
         }
 
-        while (!queue.pack(msgId, ts)) {
+        while (!queue.pack(msgId, ts, payload)) {
             //std::cout << "\t[!] 队列已满" << std::endl;
             std::this_thread::yield();
         }
@@ -111,6 +118,7 @@ static void recvMessage(shm::ShareMemoryQueue & queue) {
     struct Msg {
         uint64_t seq;
         uint64_t ts;
+        char data[pSize];
     };
 
     LatencyRing ring;
@@ -148,7 +156,8 @@ int main(int32_t argc, char **argv) {
     }
 
     std::cout << "\t[*] 创建队列"<< std::endl;
-    shm::ShareMemoryQueue queue(argc!=1?std::atoi(argv[1]):(1<<13));
+    /*队列大小将严重影响 P99+ 延迟，抖动厉害*/
+    shm::ShareMemoryQueue queue(argc!=1?(1U<<std::atoi(argv[1])):(1U<<12));
 
     auto rc = queue.create(qName);
     assert(rc);
@@ -158,7 +167,7 @@ int main(int32_t argc, char **argv) {
     assert(pid > -1);
     if (pid == 0) {
         /*子进程，作为发送数据方*/
-        sendMessage(argc != 1);
+        sendMessage(false);
         _exit(EXIT_SUCCESS);
     }
 

@@ -382,7 +382,7 @@ inline bool ShareMemoryQueueBase::pop(void * ptr, size_t & size, int32_t ms)
     if (!rc && ms) {
         /*自旋模式，大多临界区仅是数据拷贝，很短，所以可以尝试几次再休眠等待*/
 #if 1
-        for (int8_t i = 0; i < 3; i++) {
+        for (int8_t i = 0; i < 2; i++) {
             ring::cpu_relax();
             rc = queue_->pop(ptr, size);
             if (rc) {
