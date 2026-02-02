@@ -118,26 +118,11 @@ public:
     explicit reactor(void);
     ~reactor(void) noexcept;
 
-    /*移除所有事件*/
-    void reset(bool exec = false) noexcept;
-    int32_t modEvent(int32_t fd, std::function<int32_t(int32_t)> &&) noexcept;
-    bool addEvent(int32_t fd, int32_t ev, task && func);
+    /*IO事件接口函数*/
+    template<typename Task>
+    bool addEvent(int32_t fd, int32_t ev, Task && func);
     bool removeEvent(int32_t fd) noexcept;
-
-    timerId addTimer(uint32_t expire, task && func);
-    /*func用于重置成功时，修改其他需要保护的数据*/
-    bool resetTimer(timerId & id, uint32_t expire, task && func = nullptr) noexcept;
-    bool removeTimer(timerId &) noexcept;
-
-    void addSignal(int32_t signo, task && func);
-    void removeSignal(int32_t signo) noexcept;
-
-    /*0为最高优先级*/
-    bool addAsync(task && func, bool wakeup = true, uint8_t prior = 0);
-
-    bool addEvent(int32_t fd, int32_t ev, task & func) {
-        return addEvent(fd, ev, std::forward<task>(func));
-    }
+    int32_t modEvent(int32_t fd, std::function<int32_t(int32_t)> &&) noexcept;
     int32_t checkEvent(int32_t fd) {
         return modEvent(fd, [](int32_t v){return v;});
     }
@@ -150,26 +135,34 @@ public:
     int32_t disableEvent(int32_t fd, int32_t ev) {
         return modEvent(fd, [ev](int32_t old){return (~ev) & old;});
     }
-    /*在即刻起的未来相对时间添加任务*/
-    timerId addTimer(uint32_t expire, task & func) {
-        return addTimer(expire, std::forward<task>(func));
-    }
-    void addAsync(task & func, bool wakeup = true, uint8_t prior = 0) {
-        addAsync(std::forward<task>(func), wakeup, prior);
-    }
-    void addSignal(int32_t signo, task & func) {
-        addSignal(signo, std::forward<task>(func));
-    }
 
+    /*定时器事件接口函数*/
+    template<typename Task>
+    timerId addTimer(uint32_t expire, Task && func);
+    /*func用于重置成功时，修改其他需要保护的数据*/
+    bool resetTimer(timerId & id, uint32_t expire, task && func = nullptr) noexcept;
+    bool removeTimer(timerId &) noexcept;
+
+    /*SysV信号事件接口函数*/
+    template<typename Task>
+    void addSignal(int32_t signo, Task && func);
+    void removeSignal(int32_t signo) noexcept;
+
+    /*异步任务接口函数*/
+    /*0为最高优先级*/
+    template<typename Task>
+    bool addAsync(Task && func, bool wakeup = true, uint8_t prior = 0);
+
+    /*循环控制接口*/
     int32_t run(int32_t timeout = -1) noexcept;
     void stop(void) noexcept;
     /*外部只能中断循环，而不能发送其他通知信息*/
     void notify(void) { notify(0); }
     /*同步，保证Async已经完成*/
     bool sync(bool force = false, uint32_t ms = -1U);
-    timerId doAddTimer(uint64_t expire, task && func);
-    int32_t nextTimeout(uint32_t, uint64_t) const noexcept;
     bool isTaskCtx(void) const { return tid_ == std::this_thread::get_id(); }
+    /*移除所有事件*/
+    void reset(bool exec = false) noexcept;
 
     status pollStatus(bool reset = true) {
         lock_guard guard(mutex_);
@@ -178,6 +171,9 @@ public:
         return tmp;
     }
 
+    /*在即刻起的未来相对时间添加任务*/
+    timerId doAddTimer(uint64_t expire, task && func);
+    int32_t nextTimeout(uint32_t, uint64_t) const noexcept;
 private:
     struct timerTask {
         timerId     id_;
@@ -409,11 +405,12 @@ inline void reactor::reset(bool exec) noexcept
         std::bind(&reactor::flush, this, std::placeholders::_1)));
 }
 
-inline bool reactor::addEvent(int32_t fd, int32_t ev, task && func)
+template<typename Task>
+inline bool reactor::addEvent(int32_t fd, int32_t ev, Task && func)
 {
     if (fd < 0) { return false; }
     lock_guard guard(mutex_);
-    auto res = events_.emplace(fd, ioTask(ev, genId(), std::move(func)));
+    auto res = events_.emplace(fd, ioTask(ev, genId(), std::forward<Task>(func)));
     if (res.second && polling_) { notify(0); }
     return res.second;
 }
@@ -454,10 +451,11 @@ inline reactor::timerId reactor::doAddTimer(uint64_t expire, task && func)
     return id;
 }
 
-inline reactor::timerId reactor::addTimer(uint32_t expire, task && func)
+template<typename Task>
+inline reactor::timerId reactor::addTimer(uint32_t expire, Task && func)
 {
     return doAddTimer(sys_clock() + (uint64_t)expire * 1000000,
-                    std::forward<task>(func));
+                    std::forward<Task>(func));
 }
 
 inline bool reactor::resetTimer(timerId & id, uint32_t expire, task && todo) noexcept
@@ -501,23 +499,25 @@ inline bool reactor::removeTimer(timerId & id) noexcept
     return false;
 }
 
-inline bool reactor::addAsync(task && func, bool wakeup, uint8_t prior)
+template<typename Task>
+inline bool reactor::addAsync(Task && func, bool wakeup, uint8_t prior)
 {
     if (unlikely(prior >= asyncs_.size()))
         prior = static_cast<uint8_t>(asyncs_.size() - 1);
     lock_guard guard(mutex_);
     nr_async_++;
-    asyncs_[prior].emplace_back(std::move(func));
+    asyncs_[prior].emplace_back(std::forward<Task>(func));
     /*TODO:需要验证，极限优化（解锁判断？）*/
     if (wakeup && polling_) { notify(0); }
     return true;
 }
 
-inline void reactor::addSignal(int32_t signo, task && func)
+template<typename Task>
+inline void reactor::addSignal(int32_t signo, Task && func)
 {
     lock_guard guard(mutex_);
     /*添加信号句柄并阻塞*/
-    auto p = signals_.insert({signo, std::move(func)});
+    auto p = signals_.insert({signo, std::forward<Task>(func)});
     if (!p.second) { return; }
     sigset_t mask;
     /*必须全进程阻塞信号*/
