@@ -23,26 +23,45 @@ int main(void)
 
     const std::string srvName = "BaseService";
 
-    /*创建默认基类 service ，环境只管理它的弱引用*/
+    /*
+     * 创建默认基类 service ，环境只管理它的弱引用
+     * 通过APP名称和服务名称 来标识自己的地址，代理可以通过这个地址探测到本服务
+     */
     auto service = Runtime::get()->buildService<>(srvName);
     assert(service);
 
     /*无法创造同名服务*/
-    auto srvPtr = Runtime::get()->buildService<>(srvName);
-    assert(!srvPtr);
+    {
+        auto service = Runtime::get()->buildService<>(srvName);
+        assert(!service);
+    }
 
-    /*创建默认基类 proxy ，环境只管理它的弱引用*/
+    /*
+     * 创建默认基类 proxy ，环境只管理它的弱引用
+     * 通过对端的 APP名称和 服务名称来寻址（探测服务）
+     */
     auto proxy = Runtime::get()->buildProxy<>(appName, srvName);
     assert(proxy);
 
-    /*无法创造同名代理*/
-    auto pxyPtr = Runtime::get()->buildProxy<>(appName, srvName);
-    assert(!pxyPtr);
+    {
+        /*无法创造同名代理*/
+        auto proxy = Runtime::get()->buildProxy<>(appName, srvName);
+        assert(!proxy);
+    }
 
     /*手动销毁 服务和代理*/
 
     service.reset();
     proxy.reset();
+
+    RuntimeConfig cfg;
+
+    /*这个两个字段，只在创建 Service 和 Proxy 时，被使用*/
+    cfg.rpcQueueSize = 1 << 17; /*128K*/
+    cfg.topicQueueSize = 1 << 19; /*512K*/
+
+    /*改动共享内存大小字段，重新设置配置*/
+    Runtime::get()->config(cfg);
 
     /*能再次创建了*/
     service = Runtime::get()->buildService<>(srvName);
@@ -51,7 +70,18 @@ int main(void)
     proxy = Runtime::get()->buildProxy<>(appName, srvName);
     assert(proxy);
 
-    /*服务和代理是确定的，很少在退出程序之前销毁，所以不添加主动移除接口*/
+    /*判断共享内存大小*/
+    auto oldSize = service->getSize();
+    assert(oldSize == cfg.rpcQueueSize);
+
+    oldSize = proxy->getSize();
+    assert(oldSize == cfg.topicQueueSize);
+
+    /*还原为默认的配置*/
+    cfg = RuntimeConfig();
+    Runtime::get()->config(cfg);
+
+    /*服务和代理是确定的，很少在退出程序之前销毁，所以不添加主动移除接口，但可以正确被析构*/
 }
 
     if (1)
@@ -67,7 +97,7 @@ int main(void)
     auto proxy = Runtime::get()->buildProxy<>(appName, srvName);
     assert(proxy);
 
-    /*订阅上线回调*/
+    /*订阅上线回调，发起探测，这一步是必须的*/
     uint8_t status = 0;
     proxy->getProxyStatusEvent().subscribe([&](StatusValue stat) {
         if (stat == StatusValue::APP_ONLINE) {
@@ -441,8 +471,11 @@ int main(void)
     /*异步发送请求，服务端需要响应*/
 
     proxy->requestAsync<fnv1a_64(rpcName)>(
-        [](const uint32_t & result){
+        [](bool code, const uint32_t & result){
+            /*code 指示是否成功*/
+            (void)code;
             /*响应通过确切的回调参数给出*/
+            (void)result;
         }, CString<16>("helloworld")
     );
 
@@ -478,6 +511,11 @@ int main(void)
         [&, srvWPtr = ServiceWPtr(service)] /*必须要弱引用*/
             (const RpcServer::ReqId reqId, PackBuffer & buff)
     {
+        static bool hasResponsed = false;
+
+        /*仅响应一次，观察超时*/
+        if (hasResponsed) { return; }
+
         /*解包，处理*/
         std::decay_t<decltype(CarIGN)>   carIGN{0};
         std::decay_t<decltype(CarACC)>   carACC{0};
@@ -493,6 +531,8 @@ int main(void)
         /*响应*/
         auto rc = srvWPtr.lock()->response<fnv1a_64(rpcName)>(reqId, CarStatus);
         assert(rc);
+    
+        hasResponsed = true;
     });
 
     /*创建一个指定超时请求的RPC客户端*/
@@ -505,14 +545,25 @@ int main(void)
         if (status == StatusValue::APP_ONLINE) {
             /*上线发送请求*/
             auto rc = proxy->requestAsync<fnv1a_64(rpcName)> (
-                [&](const decltype(CarStatus) & carStatus)
+                [&](bool code, const decltype(CarStatus) & carStatus)
             {
-                /*响应结果*/
-                running = false;
+                assert(code);
                 assert(carStatus == CarStatus);
             },
                 /*请求参数*/
                 CarIGN, CarACC, CarSpeed
+            );
+            assert(rc == true);
+
+            /*第二条超时*/
+            rc = proxy->requestAsync<fnv1a_64(rpcName)>(
+                [&](bool code, uint64_t &) {
+                    /*超时失败*/
+                    assert(!code);
+                    /*停止循环*/
+                    running = false;
+                }
+                /*可以没有参数*/
             );
             assert(rc == true);
         }

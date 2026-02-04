@@ -54,7 +54,8 @@ struct Fnv1a64Hasher {
 
 constexpr uint32_t PageSize     = 4096;
 constexpr uint32_t NameSize     = 128;
-constexpr uint32_t RecvBuffSize = 192;
+constexpr uint32_t RecvBuffSize = 192; /*接收静态缓存大小*/
+constexpr uint32_t MaxTryAgain  = 256; /*最大重试次数*/
 constexpr const char * FLKPath  = "/tmp/rpcTopic.os.lock";
 
 class Proxy;
@@ -165,7 +166,7 @@ public:
     PackBuffer(void) noexcept {
         static_assert(RecvBuffSize > 32, "RecvBuffSize is too small.");
     }
-    ~PackBuffer(void) { }
+    virtual ~PackBuffer(void) { }
 
     PackBuffer(const PackBuffer&) = delete;
     PackBuffer& operator=(const PackBuffer&) = delete;
@@ -417,11 +418,13 @@ enum class StatusValue : uint8_t {
 };
 
 struct RuntimeConfig {
-    uint32_t rpcQueueSize{PageSize};
-    uint32_t topicQueueSize{PageSize*16};
-    uint16_t keepAliveInterval{100};
-    uint16_t keepAliveCount{5};
-    int32_t  taskPriority{20};
+    uint32_t rpcQueueSize{PageSize}; /*RPC的共享队列的大小*/
+    uint32_t topicQueueSize{PageSize*16}; /*订阅发布的共享队列大小*/
+    uint16_t keepAliveInterval{100}; /*保活心跳间隔时间*/
+    uint16_t keepAliveCount{5}; /*保活心跳判定失败次数*/
+    int16_t  taskPriority{20}; /*内部接收线程的优先级*/
+    uint16_t maxReqCount{1024}; /*最大未响应的RPC请求数量*/
+    bool valid(void) const;
 };
 
 using PortId = uint64_t;
@@ -481,7 +484,7 @@ struct MsgHdr {
     }
     bool expired(uint32_t val) const {
         if (unlikely(type != MsgType::TOPIC_DATA && type != MsgType::RPC_DATA)) {
-            auto diff = qevent::sys_clock() - tick;
+            auto diff = (qevent::sys_clock() - tick)/(1000*1000);
             return diff > val;
         }
         return false;
@@ -623,6 +626,12 @@ public:
     ReactorPtr & loop(void) { return loop_; }
     const NameString & appName(void) const { return appName_; }
     const RuntimeConfig & config(void) const { return cfg_; }
+    void config(const RuntimeConfig & cfg) { GLock g(mutex_); cfg_ = cfg; }
+
+    /*服务查找*/
+    ServicePtr findService(const std::string &);
+    ServicePtr findService(IpcKey);
+    ProxyPtr   findProxy(IpcKey);
 
     void setPriority(void) const;
     void sendProtoMsg(const ProtoMsg &);
@@ -634,9 +643,6 @@ protected:
     bool insertShadowProxy(ShadowProxyPtr);
     bool createUnixSocket(void);
     /*TODO:不应该开放？*/
-    ServicePtr findService(const std::string &);
-    ServicePtr findService(IpcKey);
-    ProxyPtr   findProxy(IpcKey);
     ShadowProxyPtr findShadowProxy(IpcKey);
     void removeShadowProxy(IpcKey, IpcVer);
 private:
@@ -648,7 +654,7 @@ private:
     RawFd               sfd_;
     ReactorPtr          loop_;
     NameString          appName_;
-    const RuntimeConfig cfg_;
+    RuntimeConfig       cfg_;
     /*主动创建*/
     IntWeakMap<Proxy>   proxyIdx_;
     IntWeakMap<Service> serviceIdx_;
@@ -726,6 +732,9 @@ public:
     IpcEntry(uint32_t size) : shmQueue_(size) {}
 
     ShmQueue & shmQueue(void) { return shmQueue_; }
+    /*未打开之前还可以设置大小*/
+    void setSize(uint32_t size) { shmQueue_.size(size); }
+    uint32_t getSize(void) const { return shmQueue_.size(); }
     IpcKey ipcId(void) const { return id_; }
     IpcVer ipcVersion(void) const { return version_; }
     const NameString & ipcName(void) const { return ipcName_; }
@@ -1181,18 +1190,22 @@ class RpcClient {
 public:
     friend class Runtime;
     friend class Proxy;
-    using ProcFunc = std::function<void(PackBuffer &)>;
+    using ProcFunc = std::function<void(bool, PackBuffer &)>;
     ~RpcClient(void) { reset(); }
 
 protected:
     using ReqInfo = std::pair<TimerId, ProcFunc>;
     RpcClient(Proxy * proxy, PortId id) : proxy_(proxy), id_(id) {}
     explicit RpcClient(Proxy *proxy, const std::string &name, int32_t timeouts)
-        : proxy_(proxy), id_(fnv1a_64(name.c_str()))
-        , name_(name), timeouts_(timeouts)
+        : proxy_(proxy), id_(fnv1a_64(name.c_str())) , name_(name)
+        , timeouts_(static_cast<uint16_t>(timeouts))
+        , maxReqCount_(Runtime::get()->config().maxReqCount)
     {
         if (name.empty()) {
             throw std::invalid_argument("Invalid name of RpcClient");
+        }
+        if (!timeouts_) {
+            throw std::invalid_argument("Invalid timeouts of RpcClient");
         }
     }
 
@@ -1204,16 +1217,27 @@ protected:
     template <class... Args>
     bool sendReq(IpcEntry & srv, uint64_t msgId, Args &&... args);
 
+    ReqInfo removeRequest(uint64_t msgId);
+
     void reset(void);
 
     Proxy *     proxy_;
     std::mutex  mutex_;
     const PortId id_;
     const std::string name_;
-    const uint32_t    timeouts_{-1U};
+    const uint16_t    timeouts_{0};
+    const uint16_t    maxReqCount_{0};
     /*TODO:需要一个定时器来清理超时的请求*/
     std::unordered_map<uint64_t, ReqInfo> cbTab_;
 };
+
+INLINE bool RuntimeConfig::valid(void) const {
+    if (!topicQueueSize) {
+        return false;
+    }
+
+    return true;
+}
 
 INLINE ProtoMsg::ProtoMsg(MsgType t)
     : common(t), localName(Runtime::get()->appName())
@@ -1418,7 +1442,7 @@ INLINE bool Runtime::procProtoMsg(const ProtoMsg & msg, ssize_t size) {
         return false;
     }
     /*过期数据*/
-    if (msg.common.expired(cfg_.keepAliveInterval * 1000 * 1000)) {
+    if (msg.common.expired(cfg_.keepAliveInterval)) {
 #ifdef DEBUG
         app_log_warn("Receive one expired protocol message");
 #endif
@@ -2738,7 +2762,7 @@ bool Publisher::sendTopic(ShadowProxyPtr &&pxy, uint64_t id, Args &&...args) {
     hdr.msgId        = id;
 
     /*TODO:重试次数可配置*/
-    for (int32_t i = 0; i < 256; i++) {
+    for (uint32_t i = 0; i < MaxTryAgain; i++) {
         auto rc = pxy->shmQueue().pack(hdr, std::forward<Args>(args)...);
         /*TODO:空间不足，异步判断是否是失效的 proxy?*/
         if (likely(rc)) {
@@ -2821,26 +2845,34 @@ bool RpcServer::sendRsp(ShadowProxyPtr &&pxy, uint64_t msgId, Args &&...args) {
     hdr.peerIpcId    = pxy->ipcId();
     hdr.peerVersion  = pxy->ipcVersion();
     hdr.msgId        = msgId;
-    auto rc = pxy->shmQueue().pack(hdr, std::forward<Args>(args)...);
-    /*空间不足，异步判断是否是失效的 proxy?*/
-    if (unlikely(!rc)) {
-        app_log_error("Oops!!!Proxy's queue was full [%s] : "
-            "app [%s], service [%s], peer [%s], rpc [%s], msgId [0x%016llx]",
-            toXBytes(pxy->shmQueue().size()),
-            Runtime::get()->appName().c_str(), service_->serviceName().c_str(),
-            pxy->peerName().c_str(), name_.c_str(), hdr.msgId
-        );
+
+    for (uint32_t i = 0; i < MaxTryAgain; i++) {
+        auto rc = pxy->shmQueue().pack(hdr, std::forward<Args>(args)...);
+        /*空间不足，异步判断是否是失效的 proxy?*/
+        if (likely(rc)) {
 #ifdef DEBUG
-    } else {
-        app_log_debug("[%s] Send one rpc response to [%d] : "
-            "id [0x%016llx], rpc [%s], msgId [0x%016llx].",
-            service_->serviceName().c_str(), hdr.peerVersion, hdr.peerIpcId,
-            name_.c_str(), hdr.msgId
-        );
+            app_log_debug("[%s] Send one rpc response to [%d] : "
+                "id [0x%016llx], rpc [%s], msgId [0x%016llx].",
+                service_->serviceName().c_str(), hdr.peerVersion, hdr.peerIpcId,
+                name_.c_str(), hdr.msgId
+            );
 #endif
+            return true;
+        }
+        std::this_thread::yield();
     }
 
-    return rc;
+    constexpr size_t pkgSize = pack_size<std::decay_t<Args>...>::value;
+
+    app_log_error("Oops!!!Proxy's queue was full [%s] : "
+        "app [%s], service [%s], peer [%s], rpc [%s], "
+        "msgId [0x%016llx], size [%zu]",
+        toXBytes(pxy->shmQueue().size()),
+        Runtime::get()->appName().c_str(), service_->serviceName().c_str(),
+        pxy->peerName().c_str(), name_.c_str(), hdr.msgId, pkgSize
+    );
+
+    return false;
 }
 
 template<class... Args>
@@ -2869,11 +2901,9 @@ INLINE void RpcClient::reset(void) {
     }
 }
 
-INLINE void RpcClient::onRpcEvent(uint64_t msgId, PackBuffer & data) {
-    if (unlikely(msgId == 0)) { return; }
+INLINE RpcClient::ReqInfo RpcClient::removeRequest(uint64_t msgId) {
     ReqInfo info{TimerId(), nullptr};
-{
-    GLock g(mutex_);
+    if (unlikely(!proxy_)) { return info; }
     auto it = cbTab_.find(msgId);
     if (unlikely(it == cbTab_.end())) {
         app_log_warn("Can't found callback for rpc response : "
@@ -2881,24 +2911,32 @@ INLINE void RpcClient::onRpcEvent(uint64_t msgId, PackBuffer & data) {
             proxy_->peerName().c_str(), proxy_->serviceName().c_str(),
             name_.c_str(), msgId
         );
-        return;
+        return info;
     }
     info = std::move(it->second);
     cbTab_.erase(it);
+    return info;
 }
-    if (likely(info.first.first)) {
-        /*移除定时器*/
-        if (!Runtime::get()->loop()->removeTimer(info.first)) {
-            /*已经报告超时，则不回调任务？*/
-            app_log_warn("Receive one expired rpc response : "
-                "app [%s], service [%s], rpc [%s], msgId [0x%016llx].",
-                proxy_->peerName().c_str(), proxy_->serviceName().c_str(),
-                name_.c_str(), msgId
-            );
-        }
+
+INLINE void RpcClient::onRpcEvent(uint64_t msgId, PackBuffer & data) {
+    if (unlikely(msgId == 0)) { return; }
+    ReqInfo info{TimerId(), nullptr};
+{
+    GLock g(mutex_);
+    info = removeRequest(msgId);
+    /*移除定时器*/
+    if (!Runtime::get()->loop()->removeTimer(info.first)) {
+        /*已经报告超时，则不回调任务？*/
+        app_log_warn("Receive one expired rpc response : "
+            "app [%s], service [%s], rpc [%s], msgId [0x%016llx].",
+            proxy_->peerName().c_str(), proxy_->serviceName().c_str(),
+            name_.c_str(), msgId
+        );
+        return;
     }
+}
     if (likely(info.second)) {
-        info.second(data);
+        info.second(true, data);
     }
 }
 
@@ -2948,49 +2986,71 @@ bool RpcClient::sendReq(IpcEntry & srv, uint64_t msgId, Args &&... args) {
 template <class Callback, class... Args>
 bool RpcClient::request(IpcEntry & srv, Callback && func, Args &&... args) {
     using traits  = function_traits<std::decay_t<Callback>>;
-    using RpcData = std::decay_t<typename traits::template arg_type<0>>;
-    static_assert(traits::arity == 1, "func must take exactly 1 argument");
+    static_assert(traits::arity == 2, "func must take exactly 2 argument");
+    using RpsCode = std::decay_t<typename traits::template arg_type<0>>;
+    using RpcData = std::decay_t<typename traits::template arg_type<1>>;
+    static_assert(std::is_same<RpsCode, bool>::value,
+        "first argument must be bool");
     static_assert(std::is_trivially_copyable<RpcData>::value,
         "RpcData must be trivially copyable for raw buffer access");
     /*需要回复，保存回调*/
+    TimerId timer;
     uint64_t msgId = 0;
+    assert(timeouts_);
 {
     GLock g(mutex_);
-    if (unlikely(!proxy_)) { return false; }
-    for (;;) {
-        msgId = proxy_->genMsgId();
-        if (likely(!cbTab_.count(msgId))) { break; }
+    if (unlikely(!proxy_)) {
+        throw std::invalid_argument("RpcClient has been removed");
     }
-    TimerId timer;
-    /*TODO:条目数量限制*/
-    if (timeouts_) {
-        timer = Runtime::get()->loop()->addTimer(timeouts_, [=](int32_t) {
+    /*异步请求条目数量限制*/
+    if (unlikely(cbTab_.size() >= maxReqCount_)) {
+        app_log_warn("Oops!!! Too many asynchronous callback requests; "
+            "maximum of %u allowed.", maxReqCount_);
+        return false;
+    }
+    do { msgId = proxy_->genMsgId(); } while (unlikely(cbTab_.count(msgId)));
+    /*回调包装*/
+    auto doProc = [proc = std::forward<Callback>(func)]
+        (bool code, PackBuffer & buff) mutable
+    {
+        /*解码数据*/
+        if (code && buff.size() != sizeof(RpcData)) {
+            app_log_warn("Oops!!! size of RpcData miss match");
+            return;
+        }
+        auto data = buff.data<RpcData>();
+        proc(code, *data);
+    };
+    /*必须携带定时器*/
+    timer = Runtime::get()->loop()->addTimer(timeouts_, [=](int32_t) {
+        ReqInfo info{TimerId(), nullptr};
+        {
             GLock g(mutex_);
-            cbTab_.erase(msgId);
+            info = removeRequest(msgId);
+            if (unlikely(!info.second)) { return; }
             app_log_warn("Oops!!!Rpc's request was timeout : "
                 "app [%s], service [%s], peer [%s], rpc [%s], msgId [0x%016llx]",
                 Runtime::get()->appName().c_str(), proxy_->serviceName().c_str(),
                 proxy_->peerName().c_str(), name_.c_str(), msgId
             );
-        });
-    }
-
-    auto doProc = [proc = std::forward<Callback>(func)] (PackBuffer & buff)
-        mutable
-    {
-        /*解码数据*/
-        if (buff.size() != sizeof(RpcData)) {
-            app_log_warn("Oops!!! size of RpcData miss match");
-            return;
         }
-        auto data = buff.data<RpcData>();
-        proc(*data);
-        return;
-    };
+        PackBuffer buff;
+        buff.pack(RpcData{});
+        info.second(false, buff);
+    });
 
     cbTab_.emplace(msgId, std::make_pair(timer, std::move(doProc)));
 }
-    return sendReq(srv, msgId, std::forward<Args>(args)...);
+    /*解锁发送*/
+    auto rc = sendReq(srv, msgId, std::forward<Args>(args)...);
+    if (unlikely(!rc)) {
+        /*失败移除*/
+        GLock g(mutex_);
+        auto info = removeRequest(msgId);
+        Runtime::get()->loop()->removeTimer(info.first);
+    }
+
+    return rc;
 }
 
 }
