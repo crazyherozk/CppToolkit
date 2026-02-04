@@ -45,6 +45,7 @@ private:
     ~LockFreeQueue() = default;
 
     uint32_t size(void) const { return index_.size(); }
+    uint32_t capacity(void) const { return index_.capacity(); }
     const uint8_t & at(uint32_t idx) const { return data_[idx & index_.mask()]; }
     uint8_t & at(uint32_t idx) { return data_[idx & index_.mask()]; }
 
@@ -221,7 +222,11 @@ struct ShareMemoryQueueBase {
         }
     }
 
-    uint32_t size(void) const { return queue_->size(); }
+    /*真实的容量*/
+    uint32_t capacity(void) const { return queue_?queue_->capacity():0; }
+    /*未打开之前，还可以重新设置大小*/
+    void size(uint32_t siz) { if (!queue_) { shift_ = log2_ceil(siz); } }
+    uint32_t size(void) const { return !queue_?(1U << shift_):queue_->size(); }
 
     ShareMemoryQueueBase(const ShareMemoryQueueBase &) = delete;
     ShareMemoryQueueBase & operator = (const ShareMemoryQueueBase &) = delete;
