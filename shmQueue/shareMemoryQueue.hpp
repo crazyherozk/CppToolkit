@@ -188,7 +188,7 @@ private:
     }
 
     void wakeup(sem_t * sem) {
-        if (unlikely(waiting_.exchange(false, std::memory_order_acq_rel))) {
+        if (waiting_.exchange(false)) {
             int32_t rc = ::sem_post(sem);
             if (unlikely(rc == -1)) {
                 fprintf(stderr, "Oops!!!sem post failed : %p, %s\n", sem,
@@ -199,12 +199,11 @@ private:
 
     void waitPrepare(void) {
         /*先判断消费端是否稳定*/
-        if (!waiting_.load(std::memory_order_relaxed))
-            waiting_.store(true, std::memory_order_release);
+        waiting_.store(true);
     }
 
     void waitFinish(void) {
-        waiting_.store(false, std::memory_order_release);
+        waiting_.store(false);
     }
 
     static bool waitTimedout(sem_t * sem, int32_t ms) {
@@ -402,7 +401,7 @@ inline bool ShareMemoryQueueBase::pop(void * ptr, size_t & size, int32_t ms)
                 return rc;
             }
         }
-        /*乐观等待*/
+        /*悲观等待*/
         do {
             queue_->waitPrepare();
             rc = queue_->pop(ptr, size);

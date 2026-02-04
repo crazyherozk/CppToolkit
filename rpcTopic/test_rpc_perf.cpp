@@ -1,3 +1,4 @@
+#undef DEBUG
 #include <vector>
 #include <iostream>
 
@@ -20,7 +21,7 @@ constexpr const uint32_t RpcQueueSize      = 1U << 12; /*RPC队列的共享内�
 constexpr const uint32_t RpcPayloadSize    = 32; /*RPC的负载大小*/
 constexpr const uint32_t StatisticPerCount = 128; /*每多少条数据统计一次*/
 constexpr const uint32_t ShowPerCount      = 4096; /*每多少条数据统计一次*/
-constexpr const uint32_t SendCount         = 1U << 18; /*请求数据条数*/
+constexpr const uint32_t SendCount         = 1U << 16; /*请求数据条数*/
 
 struct LatencyVector {
     uint64_t data_[ShowPerCount];
@@ -49,7 +50,7 @@ struct LatencyVector {
         for (size_t i = 0; i < idx_; ++i) {
             auto v = data_[i];
             samples.push_back(v);
-            // fprintf(stderr, "message latency : %llu\n", v);
+//            fprintf(stderr, "message latency : %llu\n", v);
         }
         std::sort(samples.begin(), samples.end());
         auto p50  = samples[samples.size() * 50 / 100];
@@ -103,6 +104,9 @@ static void launch_request(IpcKey pxyId, bool & running) {
                 /*间隔一些消息来统计延迟，防止 获取 系统单调时间 带来的干扰*/
                 msg.ts = qevent::sys_clock();
             }
+            std::mutex mutex;
+            std::condition_variable cond;
+            bool finish = false;
             /*保证请求发送成功，即使队列暂时满了*/
             do {
                 auto rc = pxy->requestAsync<fnv1a_64(RpcName)>(
@@ -116,6 +120,11 @@ static void launch_request(IpcKey pxyId, bool & running) {
                             vector.push(latency);
                         }
                         RecvCount++;
+#if 1
+                        std::lock_guard<std::mutex> g(mutex);
+                        finish = true;
+                        cond.notify_one();
+#endif
                     }
                     , msg
                 );
@@ -123,7 +132,11 @@ static void launch_request(IpcKey pxyId, bool & running) {
                     break;
                 }
             } while (true && running);
+            /*等待完成，再发送？*/
 #if 1
+            std::unique_lock<std::mutex> lock(mutex);
+            cond.wait(lock, [&](void) { return finish; });
+#else
             /*防止快速塞满服务端的队列，带来调度上的严重干扰，实际业务中，也不可能一直死循环请求*/
             std::this_thread::yield();
 #endif
@@ -157,7 +170,7 @@ static void run_proxy() {
     LatencyVector vector;
 
     /*启动一个客户端*/
-    auto id = pxy->buildRpcClient(RpcName, 10);
+    auto id = pxy->buildRpcClient(RpcName, 100);
     assert(id);
 
     bool running = true;
@@ -188,6 +201,8 @@ static void run_proxy() {
 
     /*手动移除，解除回调中的引用，防止智能指针的环形引用*/
     pxy->removeRpcClient(id);
+
+    ::sleep(2);
 }
 
 static void run_service() {
@@ -237,18 +252,19 @@ static void run_service() {
 }
 
 int main(void) {
-    ezlog::initialize(nullptr, ezlog::EZLOG_INFO);
 
     auto pid = ::fork();
     assert(pid != -1);
 
     if (pid == 0) {
+        // ezlog::initialize("/tmp/proxy.log", ezlog::EZLOG_DEBUG);
         /*子进程*/
-        run_proxy();
+        run_service();
         exit(EXIT_SUCCESS);
     }
 
-    run_service();
+    // ezlog::initialize("/tmp/service.log", ezlog::EZLOG_DEBUG);
+    run_proxy();
 
     ::wait(nullptr);
 
