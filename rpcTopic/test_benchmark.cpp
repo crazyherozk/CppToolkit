@@ -545,6 +545,7 @@ int main(void)
         if (status == StatusValue::APP_ONLINE) {
             /*上线发送请求*/
             auto rc = proxy->requestAsync<fnv1a_64(rpcName)> (
+                /*响应的回调*/
                 [&](bool code, const decltype(CarStatus) & carStatus)
             {
                 assert(code);
@@ -563,7 +564,7 @@ int main(void)
                     /*停止循环*/
                     running = false;
                 }
-                /*可以没有参数*/
+                /*可以没有参数，相当于 call(void) */
             );
             assert(rc == true);
         }

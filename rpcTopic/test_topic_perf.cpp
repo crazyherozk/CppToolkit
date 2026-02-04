@@ -206,6 +206,7 @@ static void run_service() {
 int main(void) {
     ezlog::initialize(nullptr, ezlog::EZLOG_INFO);
 
+    /*虽然使用亲缘进程模拟发布端、订阅端，但是处了ezlog部分已经初始化，其余数据均为私用*/
     auto pid = ::fork();
     assert(pid != -1);
 

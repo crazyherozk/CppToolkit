@@ -224,12 +224,14 @@ public:
     template <typename T,
               typename std::enable_if<!std::is_void<T>::value, int>::type = 0>
     T* data() noexcept {
+        if (size() < sizeof(T)) { return nullptr; }
         return reinterpret_cast<T*>(&buffer_.get()[head_]);
     }
 
     template <typename T,
               typename std::enable_if<!std::is_void<T>::value, int>::type = 0>
     const T* data() const noexcept {
+        if (size() < sizeof(T)) { return nullptr; }
         return reinterpret_cast<const T*>(&buffer_.get()[head_]);
     }
 
@@ -1850,7 +1852,7 @@ INLINE Service::Service(const std::string & serviceName)
     //ipcName += "." + std::to_string(::getpid());
     ipcName_ = ipcName;
     id_ = fnv1a_64(ipcName.c_str());
-    app_log_info("Gen name of service [0x%016llu] : %s.", id_, ipcName_.c_str());
+    app_log_info("Gen name of service [0x%016llx] : %s.", id_, ipcName_.c_str());
 }
 
 INLINE Service::~Service(void) {
@@ -2033,7 +2035,7 @@ INLINE Proxy::Proxy(const std::string & peerName, const std::string & serviceNam
     //ipcName += "." + std::to_string(::getpid());
     ipcName_ = ipcName;
     id_ = fnv1a_64(ipcName.c_str());
-    app_log_info("Gen name of proxy [0x%016llu] : %s.", id_, ipcName_.c_str());
+    app_log_info("Gen name of proxy [0x%016llx] : %s.", id_, ipcName_.c_str());
 }
 
 template <class... Args>
