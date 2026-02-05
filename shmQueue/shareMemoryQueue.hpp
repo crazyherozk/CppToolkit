@@ -249,7 +249,11 @@ struct ShareMemoryQueueBase {
     bool valid(void) const { return queue_ != nullptr; }
     virtual void close(void) { queue_.reset(); sem_.reset(); }
 
-    virtual ~ShareMemoryQueueBase() { }
+    virtual ~ShareMemoryQueueBase() {
+        if (queue_ && !queue_->index_.stabled()) {
+            fprintf(stderr, "Queue was unstabled : %s\n", name_.c_str());
+        }
+    }
 
     /*强制解除VFS对象*/
     static void unlink(const std::string &name);
@@ -309,6 +313,9 @@ protected:
     QueuePtr queue_{nullptr};
     SemPtr   sem_{nullptr};
 
+    LockFreeQueue * raw_queue_{nullptr};
+    sem_t         * raw_sem_{nullptr};
+
     QueuePtr mmap(int32_t, bool);
     SemPtr   sem_open(QueuePtr&, const std::string &, bool);
 
@@ -349,7 +356,7 @@ bool ShareMemoryQueueBase::atomicExec(bool excl, const Func & func,
             fprintf(stderr, "Can't create sem for flock : %s\n", fileName);
             return false;
         }
-        sem = SemPtr(obj, [=](sem_t *ptr) {
+        sem = SemPtr(obj, [](sem_t *ptr) {
             ::sem_post(ptr); /*信号、异常导致没有清理？*/
             ::sem_close(ptr);
         });
@@ -370,10 +377,10 @@ bool ShareMemoryQueueBase::atomicExec(bool excl, const Func & func,
 inline bool ShareMemoryQueueBase::push(const void *ptr, size_t size)
 {
     if (unlikely(ptr == nullptr || size == 0)) { return false; }
-    if (unlikely(!queue_)) { return false; }
-    bool rc = queue_->push(ptr, size);
+    if (unlikely(!raw_queue_)) { return false; }
+    bool rc = raw_queue_->push(ptr, size);
     if (likely(rc)) {
-        queue_->wakeup(sem_.get());
+        raw_queue_->wakeup(raw_sem_);
         return true;
     }
     return false;
@@ -381,14 +388,14 @@ inline bool ShareMemoryQueueBase::push(const void *ptr, size_t size)
 
 inline bool ShareMemoryQueueBase::pop(void * ptr, size_t & size, int32_t ms)
 {
-    if (unlikely(!queue_)) { return false; }
-    bool rc = queue_->pop(ptr, size);
+    if (unlikely(!raw_queue_)) { return false; }
+    bool rc = raw_queue_->pop(ptr, size);
     if (!rc && ms) {
         /*自旋模式，大多临界区仅是数据拷贝，很短，所以可以尝试几次再休眠等待*/
 #if 1
         for (int8_t i = 0; i < 2; i++) {
             ring::cpu_relax();
-            rc = queue_->pop(ptr, size);
+            rc = raw_queue_->pop(ptr, size);
             if (rc) {
                 return rc;
             }
@@ -396,20 +403,20 @@ inline bool ShareMemoryQueueBase::pop(void * ptr, size_t & size, int32_t ms)
 #endif
         for (int8_t i = 0; i < 3; i++) {
             std::this_thread::yield();
-            rc = queue_->pop(ptr, size);
+            rc = raw_queue_->pop(ptr, size);
             if (rc) {
                 return rc;
             }
         }
         /*悲观等待*/
         do {
-            queue_->waitPrepare();
-            rc = queue_->pop(ptr, size);
+            raw_queue_->waitPrepare();
+            rc = raw_queue_->pop(ptr, size);
             if (rc) {
                 break;
             }
-        } while (queue_->waitTimedout(sem_.get(), ms));
-        queue_->waitFinish();
+        } while (raw_queue_->waitTimedout(sem_.get(), ms));
+        raw_queue_->waitFinish();
     }
     return rc;
 }
@@ -424,22 +431,24 @@ std::pair<bool, const T &> ShareMemoryQueueBase::peek(int32_t ms) {
         }
     }
     uint32_t idx;
-    const size_t len = queue_->decodeHSize(idx);
+    const size_t len = raw_queue_->decodeHSize(idx);
     if (!len) {
-        return std::make_pair(false, reinterpret_cast<const T&>(queue_->at(0)));
+        return std::make_pair(false,
+            reinterpret_cast<const T&>(raw_queue_->at(0))
+        );
     }
     /*TODO:如果遇尾部不连续内存，需要拷贝*/
     return std::make_pair(true, reinterpret_cast<const T&>(
-        queue_->at(idx + LockFreeQueue::HSize)
+        raw_queue_->at(idx + LockFreeQueue::HSize)
     ));
 }
 
 template <typename... Args>
 bool ShareMemoryQueueBase::pack(Args&&... args) {
-    if (unlikely(!queue_)) { return false; }
-    bool rc = queue_->pack(std::forward<Args>(args)...);
+    if (unlikely(!raw_queue_)) { return false; }
+    bool rc = raw_queue_->pack(std::forward<Args>(args)...);
     if (likely(rc)) {
-        queue_->wakeup(sem_.get());
+        raw_queue_->wakeup(raw_sem_);
         return true;
     }
     return false;
@@ -448,8 +457,8 @@ bool ShareMemoryQueueBase::pack(Args&&... args) {
 /*不加入阻塞，一般使用 peek 去等待数据到来，然后解包*/
 template <typename... Args>
 bool ShareMemoryQueueBase::unpack(Args&&... args) {
-    if (unlikely(!queue_)) { return false; }
-    return queue_->unpack(std::forward<Args>(args)...);
+    if (unlikely(!raw_queue_)) { return false; }
+    return raw_queue_->unpack(std::forward<Args>(args)...);
 }
 
 inline ShareMemoryQueueBase::QueuePtr
@@ -502,6 +511,7 @@ ShareMemoryQueueBase::mmap(int32_t fd, bool created)
     }
     auto queue = QueuePtr(static_cast<LockFreeQueue*>(addr),
         [=](LockFreeQueue *ptr) {
+            raw_queue_ = nullptr;
             fprintf(stderr, "unmap a shared memory : %p\n", ptr);
             /*NOTE:如果解除映射不一致，将导致严重的泄露，系统都可能会死机*/
             ::munmap(static_cast<void*>(ptr), MSize);
@@ -531,6 +541,7 @@ ShareMemoryQueueBase::sem_open(QueuePtr & queue, const std::string & name,
     }
 
     auto sem = SemPtr(obj, [=](sem_t *ptr){
+        raw_sem_ = nullptr;
         fprintf(stderr, "close a semaphore : %p\n", ptr);
         ::sem_close(ptr);
         if (created) {
@@ -547,6 +558,7 @@ ShareMemoryQueueBase::sem_open(QueuePtr & queue, const std::string & name,
         }
     }
     auto sem = SemPtr(&queue->sem_, [=](sem_t *ptr){
+        raw_sem_ = nullptr;
         /*TODO:匿名信号量销毁后，可能导致后续调用段错误？*/
         if (created) {
             fprintf(stderr, "destory a semaphore : %p\n", ptr);
@@ -638,6 +650,8 @@ inline bool ShareMemoryQueue::create(const std::string &name, bool excl)
     }
     /*描述符可以关掉，同时忽略 RawFd 原本的清理函数*/
     ::close(fd.eat());
+    raw_queue_ = queue_.get();
+    raw_sem_   = sem_.get();
     return true;
 }
 
@@ -653,10 +667,12 @@ inline bool ShareMemoryQueue::open(const std::string &name)
     auto sem = sem_open(queue, name, false);
     if (!sem) { return false; }
     /*保存信息，每次打开都不一样*/
-    created_ = false;
-    name_    = name;
-    queue_   = std::move(queue);
-    sem_     = std::move(sem);
+    created_   = false;
+    name_      = name;
+    queue_     = std::move(queue);
+    sem_       = std::move(sem);
+    raw_queue_ = queue_.get();
+    raw_sem_   = sem_.get();
     return true;
 }
 
@@ -675,9 +691,11 @@ struct AnonMemoryQueue : public ShareMemoryQueueBase {
         auto sem = sem_open(queue, name, true);
         if (!sem) { throw std::invalid_argument("Can't create sem"); }
         /*保存信息，每次打开都不一样*/
-        name_  = name;
-        queue_ = std::move(queue);
-        sem_   = std::move(sem);
+        name_      = name;
+        queue_     = std::move(queue);
+        sem_       = std::move(sem);
+        raw_queue_ = queue_.get();
+        raw_sem_   = sem_.get();
     }
 };
 
