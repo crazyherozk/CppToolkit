@@ -10,6 +10,8 @@ QEVENT_REACTOR_VAR();
 EZLOG_HOOKER_VAR();
 RPCTOPIC_RUNTIME_VAR();
 
+//#define RPC_BATCH
+
 using namespace rpc_topic;
 
 constexpr const char * RpcName        = "rpcPerf";
@@ -98,15 +100,20 @@ static void launch_request(IpcKey pxyId, bool & running) {
         assert(pxy);
         LatencyVector vector;
         uint32_t RecvCount = 0;
+#ifndef RPC_BATCH
+        bool finish;
+        std::mutex mutex;
+        std::condition_variable cond;
+#endif
         for (uint32_t i = 0; i < SendCount && running; i++) {
             Message msg;
             if (unlikely((i & (StatisticPerCount-1)) == 0)) {
                 /*间隔一些消息来统计延迟，防止 获取 系统单调时间 带来的干扰*/
                 msg.ts = qevent::sys_clock();
             }
-            std::mutex mutex;
-            std::condition_variable cond;
-            bool finish = false;
+#ifndef RPC_BATCH
+            finish = false;
+#endif
             /*保证请求发送成功，即使队列暂时满了*/
             do {
                 auto rc = pxy->requestAsync<fnv1a_64(RpcName)>(
@@ -120,7 +127,7 @@ static void launch_request(IpcKey pxyId, bool & running) {
                             vector.push(latency);
                         }
                         RecvCount++;
-#if 1
+#ifndef RPC_BATCH
                         std::lock_guard<std::mutex> g(mutex);
                         finish = true;
                         cond.notify_one();
@@ -133,7 +140,7 @@ static void launch_request(IpcKey pxyId, bool & running) {
                 }
             } while (true && running);
             /*等待完成，再发送？*/
-#if 1
+#ifndef RPC_BATCH
             std::unique_lock<std::mutex> lock(mutex);
             cond.wait(lock, [&](void) { return finish; });
 #else
@@ -141,16 +148,14 @@ static void launch_request(IpcKey pxyId, bool & running) {
             std::this_thread::yield();
 #endif
         }
-        std::cout << "发送完毕" << std::endl;
         /*发送一条不响应的消息，通知对端退出*/
         pxy->request<fnv1a_64(RpcName)>();
-#if 1
         for (int32_t i = 0; i < 8 && RecvCount != SendCount; i++) {
             /*等待所有响应到达*/
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
-#endif
         running = false;
+        std::cout << "发送完毕" << std::endl;
     });
 
     sender.detach();
@@ -170,7 +175,7 @@ static void run_proxy() {
     LatencyVector vector;
 
     /*启动一个客户端*/
-    auto id = pxy->buildRpcClient(RpcName, 100);
+    auto id = pxy->buildRpcClient(RpcName, 10);
     assert(id);
 
     bool running = true;
@@ -201,8 +206,6 @@ static void run_proxy() {
 
     /*手动移除，解除回调中的引用，防止智能指针的环形引用*/
     pxy->removeRpcClient(id);
-
-    ::sleep(2);
 }
 
 static void run_service() {
@@ -252,19 +255,18 @@ static void run_service() {
 }
 
 int main(void) {
+    ezlog::initialize(nullptr, ezlog::EZLOG_INFO);
 
     auto pid = ::fork();
     assert(pid != -1);
 
     if (pid == 0) {
-        // ezlog::initialize("/tmp/proxy.log", ezlog::EZLOG_DEBUG);
         /*子进程*/
-        run_service();
+        run_proxy();
         exit(EXIT_SUCCESS);
     }
 
-    // ezlog::initialize("/tmp/service.log", ezlog::EZLOG_DEBUG);
-    run_proxy();
+    run_service();
 
     ::wait(nullptr);
 

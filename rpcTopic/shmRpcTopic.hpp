@@ -235,12 +235,12 @@ public:
         return reinterpret_cast<const T*>(&buffer_.get()[head_]);
     }
 
-    std::size_t size() const noexcept { return tail_ - head_; }
-    std::size_t capacity() const noexcept { return capacity_; }
+    size_t size() const noexcept { return tail_ - head_; }
+    size_t capacity() const noexcept { return capacity_; }
     bool empty() const noexcept { return size() == 0; }
     void clear() noexcept { head_ = tail_ = 0; }
 
-    void resize(std::size_t bytes) {
+    void resize(size_t bytes) {
         if (bytes > capacity_) { throw std::out_of_range("resize > capacity"); }
         tail_ = head_ + bytes;
     }
@@ -898,6 +898,29 @@ public:
 
     virtual ~Proxy(void) {
         stopRecv();
+        /*检查数据*/
+#if 0
+        for (int32_t i = 0 ; i < 8; i++) {
+            size_t size = 128;
+            PackBuffer buff(size);
+            auto rc = shmQueue_.pop(buff.data(), size, 0);
+            if (!rc) {
+                break;
+            }
+            IpcHdr hdr;
+            buff.resize(size);
+            size = buff.unpack(hdr);
+            if (size > sizeof(hdr)) {
+                if (hdr.valid()) {
+                    fprintf(stdout, ">>>> type : 0x%02x, size : %zu\n", hdr.type, buff.size());
+                } else {
+                    fprintf(stdout, ">>>> invalid magic of message\n");
+                }
+            } else {
+                fprintf(stdout, ">>>> invalid length of data : %zu\n", buff.size());
+            }
+        }
+#endif
         app_log_info("Destroy proxy : [%s].", ipcName_.c_str());
     }
 

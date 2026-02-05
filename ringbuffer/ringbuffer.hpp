@@ -216,6 +216,8 @@ inline uint32_t index::prepare_enqueue(uint32_t n, uint32_t &prev, uint32_t &nex
     prev = prod_.head.load(std::memory_order_relaxed);
     do {
         max = n;
+        /* Ensure the head is read before tail */
+        std::atomic_thread_fence(std::memory_order_acquire);
         auto tail = cons_.tail.load(std::memory_order_acquire);
         nr_free = mask + tail - prev;
         if (max > nr_free) { max = fixed?0:nr_free; }
@@ -244,6 +246,8 @@ inline uint32_t index::prepare_dequeue(uint32_t n, uint32_t &prev, uint32_t &nex
     prev = cons_.head.load(std::memory_order_relaxed);
     do {
         max = n;
+        /* Ensure the head is read before tail */
+        std::atomic_thread_fence(std::memory_order_acquire);
         auto tail = prod_.tail.load(std::memory_order_acquire);
         nr_count = tail - prev;
         if (max > nr_count) { max = fixed?0:nr_count; }
@@ -359,7 +363,7 @@ static inline int32_t sem_timedwait(sem_t* sem, const struct timespec* ts) {
     }
     const auto deadline = system_clock::from_time_t(ts->tv_sec) +
                       nanoseconds(ts->tv_nsec);
-    const microseconds min_step(100);
+    const microseconds min_step(10);
     const microseconds max_step(1000);
     microseconds step = min_step;
     do {

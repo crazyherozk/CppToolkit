@@ -45,7 +45,7 @@ struct LatencyRing {
         auto p99  = samples[samples.size() * 99 / 100];
         auto p999 = samples[samples.size() * 999 / 1000];
 
-        fprintf(stderr,
+        fprintf(stdout,
             "====== latency ======\n"
             "samples : %zu\n"
             "   P50  : %llu\n"

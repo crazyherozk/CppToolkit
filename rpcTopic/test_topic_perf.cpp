@@ -79,6 +79,7 @@ struct Message {
     uint64_t    ts{0};
     CString<TopicPayloadSize> data;
     bool valid(void) const { return magic == 0xabadbeefU; }
+    Message(void) :data("HelloWorld!") {}
 };
 
 static void run_proxy() {
