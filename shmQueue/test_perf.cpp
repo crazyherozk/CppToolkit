@@ -2,6 +2,8 @@
 #include <chrono>
 #include <vector>
 #include <iostream>
+#include <algorithm>
+#include <sys/wait.h>
 #include "shareMemoryQueue.hpp"
 
 static const std::string qName = "/shm_queue_perf";

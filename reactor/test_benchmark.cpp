@@ -1,6 +1,7 @@
 #include <thread>
 #include <chrono>
 #include <iostream>
+#include <cstring>
 #include <cassert>
 #include "reactor.hpp"
 

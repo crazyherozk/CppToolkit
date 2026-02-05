@@ -250,7 +250,12 @@ int main(void)
         clnt = network::utils::connect(
             {"localhost", "20000"}, network::INET_NONE, network::INET_TCP
         );
+#ifdef __APPLE__
+        /* macOS 系统，必须要 ::close(fd) 才会无法连接？*/
         assert(*clnt > -1);
+#else
+        assert(*clnt < 0);
+#endif
 
         fprintf(stderr, "\t[*] 开始循环\n");
         /*由于延迟关闭，所以必须循环来检查，默认是100毫秒后执行回收*/

@@ -1,6 +1,7 @@
 #undef DEBUG
 #include <vector>
 #include <iostream>
+#include <algorithm>
 
 #include <sys/wait.h>
 
