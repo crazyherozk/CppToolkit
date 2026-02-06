@@ -1084,7 +1084,7 @@ protected:
     const PortId      id_;
     const std::string name_;
     /*TODO:添加一个定时器来扫描失效的 Proxy?*/
-    qevent::reactor::timerId   timer_;
+    TimerId           timer_;
     mutable SharedMutex     mutex_;
     IntWeakMap<ShadowProxy> pxyTab_; /*与该端口通信的Proxy集合*/
 };
@@ -1215,11 +1215,14 @@ class RpcClient {
 public:
     friend class Runtime;
     friend class Proxy;
-    using ProcFunc = std::function<void(bool, PackBuffer &)>;
     ~RpcClient(void) { reset(); }
 
 protected:
-    using ReqInfo = std::pair<TimerId, ProcFunc>;
+    using TimerTask = std::function<void()>;
+    using TimerMap  = std::map<uint64_t, TimerTask>;
+    using ProcFunc  = std::function<void(bool, PackBuffer &)>;
+    using ReqInfo   = std::pair<uint64_t, ProcFunc>;
+    using RspCbTab  = std::unordered_map<uint64_t, ReqInfo>;
     RpcClient(Proxy * proxy, PortId id) : proxy_(proxy), id_(id) {}
     explicit RpcClient(Proxy *proxy, const std::string &name, int32_t timeouts)
         : proxy_(proxy), id_(fnv1a_64(name.c_str())) , name_(name)
@@ -1232,6 +1235,12 @@ protected:
         if (!timeouts_) {
             throw std::invalid_argument("Invalid timeouts of RpcClient");
         }
+        if (timeouts_ < 10) {
+            throw std::invalid_argument("Timeouts is too small (>=10)");
+        }
+        /*直接启动定时器*/
+        timerId_ = Runtime::get()->loop()->addTimer(timeouts_/2,
+            std::bind(&RpcClient::onTimedout, this, std::placeholders::_1));
     }
 
     void onRpcEvent(uint64_t msgId, PackBuffer & data);
@@ -1244,16 +1253,22 @@ protected:
 
     ReqInfo removeRequest(uint64_t msgId);
 
+    uint64_t insertTimer(TimerTask &&);
+    bool removeTimer(uint64_t);
+    void onTimedout(int32_t);
+
     void reset(void);
 
     Proxy *     proxy_;
     std::mutex  mutex_;
+    TimerId     timerId_{0,0};
     const PortId id_;
     const std::string name_;
-    const uint16_t    timeouts_{0};
-    const uint16_t    maxReqCount_{0};
-    /*TODO:需要一个定时器来清理超时的请求*/
-    std::unordered_map<uint64_t, ReqInfo> cbTab_;
+    const uint16_t timeouts_{0};
+    const uint16_t maxReqCount_{0};
+    /*一个定时器来清理超时的请求*/
+    TimerMap  timerTab_;
+    RspCbTab  rspCbTab_;
 };
 
 INLINE bool RuntimeConfig::valid(void) const {
@@ -2920,17 +2935,17 @@ bool RpcServer::response(ReqId id, Args &&...args) {
 INLINE void RpcClient::reset(void) {
     GLock g(mutex_);
     proxy_ = nullptr;
-    for (auto && kv : cbTab_) {
-        /*移除回调超时定时器*/
-        Runtime::get()->loop()->removeTimer(kv.second.first);
-    }
+    rspCbTab_.clear();
+    timerTab_.clear();
+    /*移除回调超时定时器*/
+    Runtime::get()->loop()->removeTimer(timerId_);
 }
 
 INLINE RpcClient::ReqInfo RpcClient::removeRequest(uint64_t msgId) {
-    ReqInfo info{TimerId(), nullptr};
+    ReqInfo info{0, nullptr};
     if (unlikely(!proxy_)) { return info; }
-    auto it = cbTab_.find(msgId);
-    if (unlikely(it == cbTab_.end())) {
+    auto it = rspCbTab_.find(msgId);
+    if (unlikely(it == rspCbTab_.end())) {
         app_log_warn("Can't found callback for rpc response : "
             "app [%s], service [%s], rpc [%s], msgId [0x%016llx].",
             proxy_->peerName().c_str(), proxy_->serviceName().c_str(),
@@ -2939,18 +2954,18 @@ INLINE RpcClient::ReqInfo RpcClient::removeRequest(uint64_t msgId) {
         return info;
     }
     info = std::move(it->second);
-    cbTab_.erase(it);
+    rspCbTab_.erase(it);
     return info;
 }
 
 INLINE void RpcClient::onRpcEvent(uint64_t msgId, PackBuffer & data) {
     if (unlikely(msgId == 0)) { return; }
-    ReqInfo info{TimerId(), nullptr};
+    ReqInfo info{0, nullptr};
 {
     GLock g(mutex_);
     info = removeRequest(msgId);
     /*移除定时器*/
-    if (!Runtime::get()->loop()->removeTimer(info.first)) {
+    if (!removeTimer(info.first)) {
         /*已经报告超时，则不回调任务？*/
         app_log_warn("Receive one expired rpc response : "
             "app [%s], service [%s], rpc [%s], msgId [0x%016llx].",
@@ -3008,6 +3023,47 @@ bool RpcClient::sendReq(IpcEntry & srv, uint64_t msgId, Args &&... args) {
     return false;
 }
 
+INLINE uint64_t RpcClient::insertTimer(RpcClient::TimerTask && task) {
+    auto expire = qevent::sys_clock();
+    expire += static_cast<uint64_t>(timeouts_) * 1000 * 1000;
+    do {/*以超时绝对值作为ID，不能重复*/
+        auto res = timerTab_.emplace(expire, std::move(task));
+        if (res.second) { break; }
+        expire += 1;
+        if (unlikely(!expire)) { expire += 1000*1000; }
+    } while (true);
+    return expire;
+}
+
+INLINE bool RpcClient::removeTimer(uint64_t id) {
+    if (unlikely(!id)) return false;
+    return !!timerTab_.erase(id);
+}
+
+INLINE void RpcClient::onTimedout(int32_t) {
+    bool launch = true;
+    auto now = qevent::sys_clock();
+{
+    std::unique_lock<std::mutex> mutex(mutex_);
+    for (int32_t i = 0; i < 32 && likely(proxy_) && timerTab_.size(); i++) {
+        auto it = timerTab_.begin();
+        if (qevent::utils::time_before64(now, it->first)) { break; }
+        auto task = std::move(it->second);
+        timerTab_.erase(it);
+        mutex.unlock();
+        try { task(); } catch(...) {}
+        if (unlikely(!((i+1)&7))) { now = qevent::sys_clock(); }
+        mutex.lock();
+    }
+    if (unlikely(!proxy_)) { launch = false; }
+}
+    /*再次添加*/
+    if (likely(launch)) {
+        timerId_ = Runtime::get()->loop()->addTimer(timeouts_/2,
+            std::bind(&RpcClient::onTimedout, this, std::placeholders::_1));
+    }
+}
+
 template <class Callback, class... Args>
 bool RpcClient::request(IpcEntry & srv, Callback && func, Args &&... args) {
     using traits  = function_traits<std::decay_t<Callback>>;
@@ -3019,7 +3075,6 @@ bool RpcClient::request(IpcEntry & srv, Callback && func, Args &&... args) {
     static_assert(std::is_trivially_copyable<RpcData>::value,
         "RpcData must be trivially copyable for raw buffer access");
     /*需要回复，保存回调*/
-    TimerId timer;
     uint64_t msgId = 0;
     assert(timeouts_);
 {
@@ -3028,12 +3083,13 @@ bool RpcClient::request(IpcEntry & srv, Callback && func, Args &&... args) {
         throw std::invalid_argument("RpcClient has been removed");
     }
     /*异步请求条目数量限制*/
-    if (unlikely(cbTab_.size() >= maxReqCount_)) {
+    if (unlikely(rspCbTab_.size() >= maxReqCount_)) {
         app_log_warn("Oops!!! Too many asynchronous callback requests; "
             "maximum of %u allowed.", maxReqCount_);
         return false;
     }
-    do { msgId = proxy_->genMsgId(); } while (unlikely(cbTab_.count(msgId)));
+    /*确保ID唯一*/
+    do { msgId = proxy_->genMsgId(); } while (unlikely(rspCbTab_.count(msgId)));
     /*回调包装*/
     auto doProc = [proc = std::forward<Callback>(func)]
         (bool code, PackBuffer & buff) mutable
@@ -3047,8 +3103,8 @@ bool RpcClient::request(IpcEntry & srv, Callback && func, Args &&... args) {
         proc(code, *data);
     };
     /*必须携带定时器*/
-    timer = Runtime::get()->loop()->addTimer(timeouts_, [=](int32_t) {
-        ReqInfo info{TimerId(), nullptr};
+    auto timer = insertTimer([=](void){
+        ReqInfo info{0, nullptr};
         {
             GLock g(mutex_);
             info = removeRequest(msgId);
@@ -3064,7 +3120,7 @@ bool RpcClient::request(IpcEntry & srv, Callback && func, Args &&... args) {
         info.second(false, buff);
     });
 
-    cbTab_.emplace(msgId, std::make_pair(timer, std::move(doProc)));
+    rspCbTab_.emplace(msgId, std::make_pair(timer, std::move(doProc)));
 }
     /*解锁发送*/
     auto rc = sendReq(srv, msgId, std::forward<Args>(args)...);
@@ -3072,7 +3128,7 @@ bool RpcClient::request(IpcEntry & srv, Callback && func, Args &&... args) {
         /*失败移除*/
         GLock g(mutex_);
         auto info = removeRequest(msgId);
-        Runtime::get()->loop()->removeTimer(info.first);
+        removeTimer(info.first);
     }
 
     return rc;

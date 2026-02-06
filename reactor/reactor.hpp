@@ -172,7 +172,8 @@ public:
     }
 
     /*在即刻起的未来相对时间添加任务*/
-    timerId doAddTimer(uint64_t expire, task && func);
+    template<typename Task>
+    timerId doAddTimer(uint64_t expire, Task && func);
     int32_t nextTimeout(uint32_t, uint64_t) const noexcept;
 private:
     struct timerTask {
@@ -434,7 +435,8 @@ inline bool reactor::removeEvent(int32_t fd) noexcept
     return !!rc;
 }
 
-inline reactor::timerId reactor::doAddTimer(uint64_t expire, task && func)
+template<typename Task>
+inline reactor::timerId reactor::doAddTimer(uint64_t expire, Task && func)
 {
     timerId id;
     lock_guard guard(mutex_);
@@ -446,7 +448,7 @@ inline reactor::timerId reactor::doAddTimer(uint64_t expire, task && func)
     }
     id.first  = genId();
     id.second = expire;
-    timers_.emplace(id.second, timerTask(id, std::move(func)));
+    timers_.emplace(id.second, timerTask(id, std::forward<Task>(func)));
     if (polling_) { notify(0); }
     return id;
 }
@@ -618,7 +620,7 @@ inline int32_t reactor::eatTimer(unique_lock & mutex) noexcept
     do {
         auto it = timers_.begin();
         if (utils::time_before64(now, it->first)) { break; }
-        timerTask timer = std::move(it->second);
+        auto timer = std::move(it->second);
         assert(it->first == timer.id_.second);
         timers_.erase(it);
         status_.nr_done_++;
@@ -626,9 +628,9 @@ inline int32_t reactor::eatTimer(unique_lock & mutex) noexcept
         auto escape = static_cast<int32_t>(
             (static_cast<int64_t>(now) - timer.id_.second)/1000000);
         try { timer.task_(escape); } catch(...) {}
+        if (unlikely(!((++nr)&7))) { now = sys_clock(); }
         mutex.lock(); calling_ = 0;
         if (timers_.empty()) { break; }
-        if (unlikely(!((++nr)&7))) { now = sys_clock(); }
     } while (unlikely(nr < 32));
     return nr;
 }
