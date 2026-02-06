@@ -24,7 +24,11 @@ constexpr const uint32_t RpcQueueSize      = 1U << 12; /*RPC队列的共享内�
 constexpr const uint32_t RpcPayloadSize    = 32; /*RPC的负载大小*/
 constexpr const uint32_t StatisticPerCount = 128; /*每多少条数据统计一次*/
 constexpr const uint32_t ShowPerCount      = 4096; /*每多少条数据统计一次*/
+#ifdef RPC_BATCH
 constexpr const uint32_t SendCount         = 1U << 16; /*请求数据条数*/
+#else
+constexpr const uint32_t SendCount         = 1U << 19; /*请求数据条数*/
+#endif
 
 struct LatencyVector {
     uint64_t data_[ShowPerCount];

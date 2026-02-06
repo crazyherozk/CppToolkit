@@ -1256,6 +1256,7 @@ protected:
     uint64_t insertTimer(TimerTask &&);
     bool removeTimer(uint64_t);
     void onTimedout(int32_t);
+    template<class RpcData> void doTimedout(uint64_t);
 
     void reset(void);
 
@@ -3069,6 +3070,24 @@ INLINE void RpcClient::onTimedout(int32_t) {
     }
 }
 
+template <class RpcData>
+void RpcClient::doTimedout(uint64_t msgId) {
+    ReqInfo info{0, nullptr};
+{
+    GLock g(mutex_);
+    info = removeRequest(msgId);
+    if (unlikely(!info.second)) { return; }
+    app_log_warn("Oops!!!Rpc's request was timeout : "
+        "app [%s], service [%s], peer [%s], rpc [%s], msgId [0x%016llx]",
+        Runtime::get()->appName().c_str(), proxy_->serviceName().c_str(),
+        proxy_->peerName().c_str(), name_.c_str(), msgId
+    );
+}
+    PackBuffer buff;
+    buff.pack(RpcData{});
+    info.second(false, buff);
+}
+
 template <class Callback, class... Args>
 bool RpcClient::request(IpcEntry & srv, Callback && func, Args &&... args) {
     using traits  = function_traits<std::decay_t<Callback>>;
@@ -3108,23 +3127,10 @@ bool RpcClient::request(IpcEntry & srv, Callback && func, Args &&... args) {
         proc(code, *data);
     };
     /*必须携带定时器*/
-    auto timer = insertTimer([=](void){
-        ReqInfo info{0, nullptr};
-        {
-            GLock g(mutex_);
-            info = removeRequest(msgId);
-            if (unlikely(!info.second)) { return; }
-            app_log_warn("Oops!!!Rpc's request was timeout : "
-                "app [%s], service [%s], peer [%s], rpc [%s], msgId [0x%016llx]",
-                Runtime::get()->appName().c_str(), proxy_->serviceName().c_str(),
-                proxy_->peerName().c_str(), name_.c_str(), msgId
-            );
-        }
-        PackBuffer buff;
-        buff.pack(RpcData{});
-        info.second(false, buff);
+    auto timer = insertTimer([=](void) mutable {
+        doTimedout<RpcData>(msgId);
     });
-
+    /*插入回调表*/
     rspCbTab_.emplace(msgId, std::make_pair(timer, std::move(doProc)));
 }
     /*解锁发送*/
