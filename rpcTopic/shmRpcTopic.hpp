@@ -3041,13 +3041,19 @@ INLINE bool RpcClient::removeTimer(uint64_t id) {
 }
 
 INLINE void RpcClient::onTimedout(int32_t) {
-    bool launch = true;
+    uint64_t next = timeouts_/2;
     auto now = qevent::sys_clock();
-{
     std::unique_lock<std::mutex> mutex(mutex_);
+    /*循环查看所有超时的回调*/
     for (int32_t i = 0; i < 32 && likely(proxy_) && timerTab_.size(); i++) {
         auto it = timerTab_.begin();
-        if (qevent::utils::time_before64(now, it->first)) { break; }
+        auto expire = it->first;
+        expire -= (expire % 1000000); /*向下对齐，未来1ms内的回调，在本次触发*/
+        if (qevent::utils::time_before64(now, expire)) {
+            next = it->first - now;
+            if (next < 1000000) { next = 1000000; }
+            break;
+        }
         auto task = std::move(it->second);
         timerTab_.erase(it);
         mutex.unlock();
@@ -3055,11 +3061,10 @@ INLINE void RpcClient::onTimedout(int32_t) {
         if (unlikely(!((i+1)&7))) { now = qevent::sys_clock(); }
         mutex.lock();
     }
-    if (unlikely(!proxy_)) { launch = false; }
-}
     /*再次添加*/
-    if (likely(launch)) {
-        timerId_ = Runtime::get()->loop()->addTimer(timeouts_/2,
+    if (likely(proxy_)) {
+        /*精准定时？*/
+        timerId_ = Runtime::get()->loop()->doAddTimer(now + next,
             std::bind(&RpcClient::onTimedout, this, std::placeholders::_1));
     }
 }
@@ -3095,7 +3100,7 @@ bool RpcClient::request(IpcEntry & srv, Callback && func, Args &&... args) {
         (bool code, PackBuffer & buff) mutable
     {
         /*解码数据*/
-        if (code && buff.size() != sizeof(RpcData)) {
+        if (unlikely(buff.size() != sizeof(RpcData))) {
             app_log_warn("Oops!!! size of RpcData miss match");
             return;
         }

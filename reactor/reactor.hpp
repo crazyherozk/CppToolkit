@@ -442,9 +442,8 @@ inline reactor::timerId reactor::doAddTimer(uint64_t expire, Task && func)
     lock_guard guard(mutex_);
     if (timers_.size()) {
         auto next = timers_.begin()->first;
-        if (next/1000000 == expire/1000000) {
-            expire += 1000000;
-        }
+        /*尽量离散定时器*/
+        if ((next>>20) == (expire>>20)) { expire += 1000000; }
     }
     id.first  = genId();
     id.second = expire;
@@ -456,7 +455,7 @@ inline reactor::timerId reactor::doAddTimer(uint64_t expire, Task && func)
 template<typename Task>
 inline reactor::timerId reactor::addTimer(uint32_t expire, Task && func)
 {
-    return doAddTimer(sys_clock() + (uint64_t)expire * 1000000,
+    return doAddTimer(sys_clock() + static_cast<uint64_t>(expire) * 1000000,
                     std::forward<Task>(func));
 }
 
@@ -601,7 +600,7 @@ inline int32_t reactor::nextTimeout(uint32_t timeout, uint64_t now) const noexce
     /*异步事件堆积，则不休眠*/
     if (nr_async_ || asignal_.any()) { return 0; }
     if (timers_.empty() || !timeout) { return timeout; }
-    int64_t next = 0;
+    uint64_t next = 0;
     auto first = timers_.begin()->first;
     if (utils::time_before64(now, first)) {
         next = (first - now)/1000000;
