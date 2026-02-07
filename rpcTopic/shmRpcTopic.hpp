@@ -56,6 +56,8 @@ constexpr uint32_t PageSize     = 4096;
 constexpr uint32_t NameSize     = 128;
 constexpr uint32_t RecvBuffSize = 192; /*接收静态缓存大小*/
 constexpr uint32_t MaxTryAgain  = 256; /*最大重试次数*/
+constexpr uint32_t MaxReqCount  = 1024;
+constexpr uint32_t GenTimeouts  = 500; /*通用定时间隔*/
 constexpr const char * FLKPath  = "/tmp/rpcTopic.os.lock";
 
 class Proxy;
@@ -546,28 +548,23 @@ struct ProtoMsg {
         NameString  ipcName; /*service 的 ipc*/
     } rspRegProxy;
     struct {
-        PortId    topic;
+        PortId     topic;
         uint8_t    cancel; /*=1 则取消订阅，不需要响应*/
         uint8_t    _pad[7];
         NameString topicName;
     } reqSubTopic;
     struct {
         RunningCode code;
-        PortId     topic;
+        PortId      topic;
     } rspSubTopic;
     struct {
-        PortId       rpcId;
+        PortId      rpcId;
         NameString  rpcName;
     } reqRegRpc;
     struct {
         RunningCode code;
-        PortId       rpcId;
+        PortId      rpcId;
     } rspRegRpc;
-    struct {
-        RunningCode code;
-        uint32_t    _1;
-        CString<64> message;
-    } generic; /*通用的响应*/
     };
 
     ProtoMsg(void) : common(), localName(), peerName() {}
@@ -576,6 +573,8 @@ struct ProtoMsg {
 
 class Runtime {
 public:
+    using RawFd = shm::ShareMemoryQueueBase::RawFd;
+
     virtual ~Runtime(void) {
         app_log_info("Destroy Runtime : %s.", appName_.c_str());
     }
@@ -625,21 +624,24 @@ public:
         return insertService(service)?service:nullptr;
     }
 
+    /*获取reactor事件循环对象*/
     ReactorPtr & loop(void) { return loop_; }
+    /*配置和名称*/
     const NameString & appName(void) const { return appName_; }
     const RuntimeConfig & config(void) const { return cfg_; }
     void config(const RuntimeConfig & cfg) { GLock g(mutex_); cfg_ = cfg; }
 
-    /*服务查找*/
+    /*服务和代理查找*/
     ServicePtr findService(const std::string &);
     ServicePtr findService(IpcKey);
     ProxyPtr   findProxy(IpcKey);
 
+    /*优先级*/
     void setPriority(void) const;
+    /*发送协议消息*/
     void sendProtoMsg(const ProtoMsg &);
-
-    static socklen_t genSockAddr(sockaddr_un &, const char *);
 protected:
+    /*管理对象辅助函数*/
     bool insertProxy(ProxyPtr);
     bool insertService(ServicePtr);
     bool insertShadowProxy(ShadowProxyPtr);
@@ -649,14 +651,13 @@ protected:
     void removeShadowProxy(IpcKey, IpcVer);
 private:
     Runtime(const std::string &, const RuntimeConfig &);
-    using RawFd = shm::ShareMemoryQueueBase::RawFd;
 
     mutable std::mutex  mutex_;
     RawFd               rfd_;
     RawFd               sfd_;
     ReactorPtr          loop_;
-    NameString          appName_;
     RuntimeConfig       cfg_;
+    NameString          appName_;
     /*主动创建*/
     IntWeakMap<Proxy>   proxyIdx_;
     IntWeakMap<Service> serviceIdx_;
@@ -685,10 +686,12 @@ private:
     bool procSrvTick(const ProtoMsg &);
     bool procPxyTick(const ProtoMsg &);
 
-    static RawFd createUnixSocketFd(void);
-
     /*一些静态数据*/
     static RuntimePtr instance_;
+public:
+    /*构造Unix套接字辅助函数*/
+    static RawFd createUnixSocketFd(void);
+    static socklen_t genSockAddr(sockaddr_un &, const char *);
     static INLINE bool write(const std::string& filename, int value) {
         std::ofstream ofs(filename, std::ios::trunc);
         if (!ofs) return false;
@@ -696,31 +699,27 @@ private:
         return ofs.good();
     }
 
-    static INLINE bool read(const std::string& filename, int& value)
-    {
+    static INLINE bool read(const std::string& filename, int& value) {
         std::ifstream ifs(filename);
         if (!ifs) return false;
         return static_cast<bool>(ifs >> value);
     }
-
 };
 
 template<class Base, class Value = StatusValue>
 class Status {
 public:
+    using ChangedFunc = std::function<void(Value)>;
     Status(Base & base) : host_(base) {}
     virtual ~Status(void) {
-        if (timerId_.first) {
-            Runtime::get()->loop()->removeTimer(timerId_);
-        }
+        Runtime::get()->loop()->removeTimer(timerId_);
     }
-    using ChangedFunc = std::function<void(Value)>;
     Value status(void) const {
         return status_.load(std::memory_order::memory_order_relaxed);
     }
 protected:
     Base &      host_;
-    TimerId     timerId_;
+    TimerId     timerId_{0,0};
     uint32_t    tick_{0};
     ChangedFunc onStatusChanged_;
     std::atomic<Value> status_{Value::INVALID_VALUE};
@@ -764,6 +763,8 @@ protected:
 class Service : public IpcEntry {
 public:
     friend class Runtime;
+    using ReqId    = std::pair<IpcKey, uint64_t>;
+
     virtual ~Service();
 
     template <
@@ -788,11 +789,16 @@ public:
         return insertRpcServer(rpcPtr)?rpcPtr->id_:0;
     }
 
+    /*没有参数默认移除所有相应对象*/
+
     bool removePublisher(PortId topic = 0);
     bool removeRpcServer(PortId rpc = 0);
 
+    /*快速启动指定参数类型的RPC服务*/
     template<class Callback>
     PortId launchRpcServer(const std::string & name, Callback && func);
+
+    /*使用ID获取相应对象*/
 
     PublisherPtr topicPublisher(PortId topic) {
         RLock r(mutex_);
@@ -805,6 +811,8 @@ public:
         auto it = rpcServerIdx_.find(rpc);
         return likely(it == rpcServerIdx_.end()) ? nullptr : it->second;
     }
+
+    /*发布的参数是POD的变参列表*/
 
     /*广播发布*/
     template<const char* Topic_, class... Args>
@@ -830,15 +838,17 @@ public:
         return publishToImpl(TopicId_, key, std::forward<Args>(args)...);
     }
 
+    /*响应，第一个参数一定是 ReqId ，由 RpcServer 的回调给出*/
+
     template<const char *Rpc_, class... Args>
-    bool response(Args &&...args) {
+    bool response(ReqId id, Args &&...args) {
         constexpr PortId rpcId = fnv1a_64(Rpc_); /*编译时计算*/
-        return responseImpl(rpcId, std::forward<Args>(args)...);
+        return responseImpl(rpcId, id, std::forward<Args>(args)...);
     }
 
     template<const PortId RpcId_, class... Args>
-    bool response(Args &&...args) {
-        return responseImpl(RpcId_, std::forward<Args>(args)...);
+    bool response(ReqId id, Args &&...args) {
+        return responseImpl(RpcId_, id, std::forward<Args>(args)...);
     }
 
     uint64_t genMsgId(void) const {
@@ -848,14 +858,18 @@ public:
 protected:
     Service(const std::string &);
 
+    /*发布的包装函数*/
     template<class... Args>
     bool publishImpl(PortId topic , Args &&...args);
 
     template<class... Args>
     bool publishToImpl(PortId topic , IpcKey key, Args &&...args);
 
+    /*响应的包装函数*/
     template<class... Args>
-    bool responseImpl(PortId rpcId, Args &&...args);
+    bool responseImpl(PortId rpcId, ReqId id, Args &&...args);
+
+    /*对象管理函数*/
 
     template<class T>
     bool insertIpcEntry(const char *, IntStrongMap<T> &, std::shared_ptr<T> &);
@@ -865,6 +879,7 @@ protected:
 
     bool insertPublisher(PublisherPtr);
     bool insertRpcServer(RpcServerPtr);
+    /*处理Rpc响应的入口函数和包装函数*/
     void onRpcEvent(const RpcHdr &, PackBuffer &);
     void procIpcMsg(const IpcHdr &, PackBuffer &) override;
 
@@ -898,29 +913,6 @@ public:
 
     virtual ~Proxy(void) {
         stopRecv();
-        /*检查数据*/
-#if 0
-        for (int32_t i = 0 ; i < 8; i++) {
-            size_t size = 128;
-            PackBuffer buff(size);
-            auto rc = shmQueue_.pop(buff.data(), size, 0);
-            if (!rc) {
-                break;
-            }
-            IpcHdr hdr;
-            buff.resize(size);
-            size = buff.unpack(hdr);
-            if (size > sizeof(hdr)) {
-                if (hdr.valid()) {
-                    fprintf(stdout, ">>>> type : 0x%02x, size : %zu\n", hdr.type, buff.size());
-                } else {
-                    fprintf(stdout, ">>>> invalid magic of message\n");
-                }
-            } else {
-                fprintf(stdout, ">>>> invalid length of data : %zu\n", buff.size());
-            }
-        }
-#endif
         app_log_info("Destroy proxy : [%s].", ipcName_.c_str());
     }
 
@@ -1287,8 +1279,8 @@ INLINE ProtoMsg::ProtoMsg(MsgType t)
 
 INLINE Runtime::Runtime(const std::string &appName, const RuntimeConfig & cfg)
     : loop_(std::make_shared<qevent::reactor>())
-    , appName_(appName)
     , cfg_(cfg)
+    , appName_(appName)
 {
     if (!appName_.size()) {
         throw std::invalid_argument("Invalid Runtime name.");
@@ -1667,8 +1659,7 @@ INLINE void Runtime::sendProtoMsg(const ProtoMsg & msg) {
          addr.sun_path);
 #endif
     /* macOS 上必须使用不同的套接字发送，否则将发生内核级死锁 */
-    auto sfd = *sfd_;
-    auto rc = ::sendto(sfd, &msg, len, 0,
+    auto rc = ::sendto(*sfd_, &msg, len, 0,
             reinterpret_cast<const sockaddr*>(&addr), l);
 #ifdef DEBUG
     if (rc != len) {
@@ -2049,10 +2040,10 @@ bool Service::publishToImpl(PortId topic, IpcKey key, Args &&...args) {
 }
 
 template<class... Args>
-bool Service::responseImpl(PortId rpcId , Args &&...args) {
+bool Service::responseImpl(PortId rpcId, ReqId id, Args &&...args) {
     auto rpcPtr = rpcServer(rpcId);
     if (unlikely(!rpcPtr)) { return false; }
-    return rpcPtr->response(std::forward<Args>(args)...);
+    return rpcPtr->response(id, std::forward<Args>(args)...);
 }
 
 INLINE Proxy::Proxy(const std::string & peerName, const std::string & serviceName)
@@ -2934,12 +2925,23 @@ bool RpcServer::response(ReqId id, Args &&...args) {
 }
 
 INLINE void RpcClient::reset(void) {
-    GLock g(mutex_);
-    proxy_ = nullptr;
-    rspCbTab_.clear();
-    timerTab_.clear();
+    if (proxy_) {
+        GLock g(mutex_);
+        rspCbTab_.clear();
+        timerTab_.clear();
+        proxy_ = nullptr;
+    }
     /*移除回调超时定时器*/
-    Runtime::get()->loop()->removeTimer(timerId_);
+    auto & loop = Runtime::get()->loop();
+    loop->removeTimer(timerId_);
+    /*非事件循环上下文，同步一次时间循环，否则 onTimedout() 可能访问野指针*/
+    if (loop->isTaskCtx()) { return; }
+    for (int32_t i = 0; i < 8; i++) {
+        if (loop->sync(false, GenTimeouts)) { return; }
+        /*主线程的事件循环出现了卡顿*/
+        app_log_warn("The main event loop is experiencing blocking.");
+    }
+    app_log_error("Oops!!!The event loop has a critical design flaw.");
 }
 
 INLINE RpcClient::ReqInfo RpcClient::removeRequest(uint64_t msgId) {
