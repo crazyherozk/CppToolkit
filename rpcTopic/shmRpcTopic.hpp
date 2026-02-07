@@ -2925,15 +2925,17 @@ bool RpcServer::response(ReqId id, Args &&...args) {
 }
 
 INLINE void RpcClient::reset(void) {
+    TimerId timerId{0, 0};
     if (proxy_) {
         GLock g(mutex_);
         rspCbTab_.clear();
         timerTab_.clear();
         proxy_ = nullptr;
+        timerId = timerId_;
     }
     /*移除回调超时定时器*/
     auto & loop = Runtime::get()->loop();
-    loop->removeTimer(timerId_);
+    loop->removeTimer(timerId);
     /*非事件循环上下文，同步一次时间循环，否则 onTimedout() 可能访问野指针*/
     if (loop->isTaskCtx()) { return; }
     for (int32_t i = 0; i < 8; i++) {
@@ -3066,9 +3068,23 @@ INLINE void RpcClient::onTimedout(int32_t) {
     }
     /*再次添加*/
     if (likely(proxy_)) {
+        /*
+         * 此处为了解锁添加，做了很多额外的工作，但是嵌套加锁会带来
+         * 很多意想不到的问题，还是值得的
+         * 解锁操作定时器，reset() 获取锁，置空 proxy，同步等待该回调结束，移除定时器
+         */
+        mutex.unlock();
+        auto & loop = Runtime::get()->loop();
         /*精准定时？*/
-        timerId_ = Runtime::get()->loop()->doAddTimer(now + next,
+        auto timerId = loop->doAddTimer(now + next,
             std::bind(&RpcClient::onTimedout, this, std::placeholders::_1));
+        mutex.lock();
+        if (likely(proxy_)) {
+            timerId_ = timerId;
+            return;
+        }
+        mutex.unlock();
+        loop->removeTimer(timerId);
     }
 }
 
