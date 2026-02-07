@@ -233,6 +233,16 @@ struct ShareMemoryQueueBase {
     ShareMemoryQueueBase(ShareMemoryQueueBase &&) = default;
     ShareMemoryQueueBase & operator = (ShareMemoryQueueBase &&) = default;
 
+    const ring::headtail & procVersion(void) const {
+        assert(queue_);
+        return queue_->index_.prod_verion();
+    }
+
+    const ring::headtail & consVersion(void) const {
+        assert(queue_);
+        return queue_->index_.cons_verion();
+    }
+
     template<typename T> std::pair<bool, const T &> peek(int32_t ms = -1);
 
     bool push(const void *, size_t);

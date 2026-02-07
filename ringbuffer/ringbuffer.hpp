@@ -106,6 +106,9 @@ struct index {
      *
      */
 
+    const headtail & prod_verion(void) const { return prod_; }
+    const headtail & cons_verion(void) const { return cons_; }
+
     bool stabled(void) {
         return (prod_.head == prod_.tail && cons_.head == cons_.tail);
     }
